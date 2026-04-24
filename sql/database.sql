@@ -128,3 +128,47 @@ CREATE TABLE results (
 );
 
 
+CREATE INDEX idx_enrollments_student   ON enrollments(student_id);
+CREATE INDEX idx_enrollments_course    ON enrollments(course_id);
+CREATE INDEX idx_grades_enrollment     ON grades(enrollment_id);
+CREATE INDEX idx_grades_component      ON grades(component_id);
+CREATE INDEX idx_components_course     ON course_grade_components(course_id);
+CREATE INDEX idx_schedules_course      ON schedules(course_id);
+CREATE INDEX idx_courses_teacher       ON courses(teacher_id);
+
+CREATE OR REPLACE VIEW vw_student_course_average AS
+SELECT
+    e.id                                                AS enrollment_id,
+    s.id                                                AS student_id,
+    s.student_no,
+    CONCAT(s.first_name,' ',s.last_name)               AS student_name,
+    sub.id                                              AS subject_id,
+    sub.code                                            AS subject_code,
+    sub.name                                            AS subject_name,
+    sub.credits,
+    c.id                                                AS course_id,
+    c.academic_year,
+    c.semester,
+    c.section,
+    e.status,
+    ROUND(
+        SUM((g.score / cgc.max_score) * cgc.weight) ,
+        2
+    )                                                   AS weighted_average
+FROM enrollments e
+JOIN students  s   ON s.id   = e.student_id
+JOIN courses   c   ON c.id   = e.course_id
+JOIN subjects  sub ON sub.id = c.subject_id
+LEFT JOIN grades g                  ON g.enrollment_id = e.id
+LEFT JOIN course_grade_components cgc ON cgc.id = g.component_id
+GROUP BY
+    e.id, s.id, s.student_no, student_name,
+    sub.id, sub.code, sub.name, sub.credits,
+    c.id, c.academic_year, c.semester, c.section, e.status;
+
+CREATE OR REPLACE VIEW vw_full_results AS
+SELECT v.*, r.letter_grade, r.grade_point, r.status AS result_status
+FROM vw_student_course_average v
+LEFT JOIN results r ON r.enrollment_id = v.enrollment_id;
+
+
