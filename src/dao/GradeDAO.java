@@ -6,6 +6,8 @@ import util.DBConnection;
 
 import java.sql.*;
 
+import java.util.ArrayList;
+import java.util.List;
 
 public class GradeDAO {
 
@@ -68,6 +70,21 @@ public class GradeDAO {
         return null;
     }
 
+    public List<Grade> getByEnrollmentId(int enrollmentId) throws SQLException {
+        List<Grade> list = new ArrayList<>();
+        String sql = "SELECT g.*, cgc.component_name, cgc.weight, cgc.max_score " +
+                     "FROM grades g JOIN course_grade_components cgc ON cgc.id=g.component_id " +
+                     "WHERE g.enrollment_id=? ORDER BY cgc.id";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, enrollmentId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) list.add(mapRowFull(rs));
+            }
+        }
+        return list;
+    }
+
     private Grade mapRow(ResultSet rs) throws SQLException {
         Grade g = new Grade();
         g.setId(rs.getInt("id"));
@@ -79,6 +96,13 @@ public class GradeDAO {
         Enrollment e = new Enrollment();
         e.setId(rs.getInt("enrollment_id"));
         g.setEnrollment(e);
+        return g;
+    }
+
+    private Grade mapRowFull(ResultSet rs) throws SQLException {
+        Grade g = mapRow(rs);
+        g.setMaxScore(rs.getDouble("max_score"));
+        g.setWeight(rs.getDouble("weight"));
         return g;
     }
 }
