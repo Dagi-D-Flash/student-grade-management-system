@@ -9,7 +9,11 @@ import util.DBConnection;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+import java.io.*;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -33,6 +37,12 @@ public class TeacherGradePanel extends JPanel {
     private JComboBox<String> cbGradeType;
     private JLabel lblTotalMarks, lblGradeLetter, lblGradePoint;
     private JButton btnSave, btnUpdate, btnDelete, btnClear;
+    
+    // Bulk operations and auto-save components
+    private JButton btnBulkSave, btnImportCSV, btnExportCSV, btnApplyToAll;
+    private JCheckBox chkAutoSave;
+    private Timer autoSaveTimer;
+    private boolean hasUnsavedChanges = false;
 
     private int selectedEnrollmentId = -1;
     private int selectedGradeId = -1;
@@ -48,6 +58,7 @@ public class TeacherGradePanel extends JPanel {
         add(buildFormPanel(),  BorderLayout.SOUTH);
 
         loadCourses();
+        initializeAutoSave();
     }
 
     private JPanel buildTopBar() {
@@ -57,11 +68,39 @@ public class TeacherGradePanel extends JPanel {
             BorderFactory.createLineBorder(new Color(220, 220, 220)),
             BorderFactory.createEmptyBorder(4, 8, 4, 8)
         ));
+        
         bar.add(new JLabel("Course:"));
         cbCourse = new JComboBox<>();
         cbCourse.setPreferredSize(new Dimension(320, 28));
         cbCourse.addActionListener(e -> loadStudents());
         bar.add(cbCourse);
+        
+        // Add bulk operations buttons
+        btnBulkSave = styledBtn("Bulk Save", new Color(255, 193, 7));
+        btnBulkSave.setForeground(Color.BLACK);
+        btnImportCSV = styledBtn("Import CSV", new Color(111, 66, 193));
+        btnExportCSV = styledBtn("Export CSV", new Color(32, 201, 151));
+        btnApplyToAll = styledBtn("Apply to All", new Color(253, 126, 20));
+        btnApplyToAll.setForeground(Color.BLACK);
+        
+        btnBulkSave.addActionListener(e -> bulkSaveGrades());
+        btnImportCSV.addActionListener(e -> importGradesFromCSV());
+        btnExportCSV.addActionListener(e -> exportGradesToCSV());
+        btnApplyToAll.addActionListener(e -> applyGradeToAllStudents());
+        
+        bar.add(Box.createHorizontalStrut(20));
+        bar.add(btnBulkSave);
+        bar.add(btnImportCSV);
+        bar.add(btnExportCSV);
+        bar.add(btnApplyToAll);
+        
+        // Auto-save checkbox
+        chkAutoSave = new JCheckBox("Auto-save");
+        chkAutoSave.setBackground(Color.WHITE);
+        chkAutoSave.addActionListener(e -> toggleAutoSave());
+        bar.add(Box.createHorizontalStrut(20));
+        bar.add(chkAutoSave);
+        
         return bar;
     }
 
@@ -158,6 +197,12 @@ public class TeacherGradePanel extends JPanel {
         tfScore.getDocument().addDocumentListener(new SimpleDocListener(this::recalculate));
         tfMaxScore.getDocument().addDocumentListener(new SimpleDocListener(this::recalculate));
         tfWeight.getDocument().addDocumentListener(new SimpleDocListener(this::recalculate));
+        
+        // Add auto-save listeners
+        tfScore.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
+        tfMaxScore.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
+        tfWeight.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
+        tfRemarks.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
 
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         btnPanel.setOpaque(false);
@@ -386,6 +431,7 @@ public class TeacherGradePanel extends JPanel {
         tfScore.setText(""); tfMaxScore.setText(""); tfWeight.setText(""); tfRemarks.setText("");
         lblTotalMarks.setText("—"); lblGradeLetter.setText("—"); lblGradePoint.setText("—");
         gradeTable.clearSelection();
+        hasUnsavedChanges = false;
     }
 
     private double parseDouble(String s) {
@@ -403,6 +449,383 @@ public class TeacherGradePanel extends JPanel {
 
     private void showError(Exception ex) {
         JOptionPane.showMessageDialog(this, ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+    }
+
+    // ========== BULK OPERATIONS AND AUTO-SAVE METHODS ==========
+    
+    private void initializeAutoSave() {
+        autoSaveTimer = new Timer(5000, e -> { // Auto-save every 5 seconds
+            if (hasUnsavedChanges && chkAutoSave.isSelected()) {
+                autoSaveGrade();
+            }
+        });
+        autoSaveTimer.setRepeats(true);
+    }
+    
+    private void toggleAutoSave() {
+        if (chkAutoSave.isSelected()) {
+            autoSaveTimer.start();
+            JOptionPane.showMessageDialog(this, "Auto-save enabled (every 5 seconds)", "Auto-save", JOptionPane.INFORMATION_MESSAGE);
+        } else {
+            autoSaveTimer.stop();
+        }
+    }
+    
+    private void markUnsavedChanges() {
+        hasUnsavedChanges = true;
+    }
+    
+    private void autoSaveGrade() {
+        if (selectedEnrollmentId < 0 || !validateGradeInput()) {
+            return;
+        }
+        
+        try {
+            Grade g = buildGradeFromForm();
+            Enrollment e = new Enrollment(); 
+            e.setId(selectedEnrollmentId);
+            g.setEnrollment(e);
+            
+            if (selectedGradeId > 0) {
+                g.setId(selectedGradeId);
+                gradeDAO.update(g);
+            } else {
+                gradeDAO.insert(g);
+            }
+            
+            hasUnsavedChanges = false;
+            loadGrades();
+            
+            // Show brief auto-save indicator
+            JLabel autoSaveLabel = new JLabel("Auto-saved ✓");
+            autoSaveLabel.setForeground(new Color(25, 135, 84));
+            autoSaveLabel.setFont(new Font("SansSerif", Font.ITALIC, 10));
+            
+        } catch (Exception ex) {
+            // Silent fail for auto-save to avoid interrupting user
+            System.err.println("Auto-save failed: " + ex.getMessage());
+        }
+    }
+    
+    private boolean validateGradeInput() {
+        String scoreText = tfScore.getText().trim();
+        String maxScoreText = tfMaxScore.getText().trim();
+        String weightText = tfWeight.getText().trim();
+        
+        if (scoreText.isEmpty() || maxScoreText.isEmpty() || weightText.isEmpty()) {
+            return false;
+        }
+        
+        try {
+            double score = Double.parseDouble(scoreText);
+            double maxScore = Double.parseDouble(maxScoreText);
+            double weight = Double.parseDouble(weightText);
+            
+            return score >= 0 && maxScore > 0 && weight >= 0 && weight <= 1.0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+    
+    private void bulkSaveGrades() {
+        if (selectedEnrollmentId < 0) {
+            JOptionPane.showMessageDialog(this, "Select a student first.", "Bulk Save", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        
+        String input = JOptionPane.showInputDialog(this, 
+            "Enter grades in format: type,score,maxScore,weight,remarks (one per line)\n" +
+            "Example:\nquiz,85,100,0.1,Good work\nassignment,92,100,0.2,Excellent", 
+            "Bulk Grade Entry", JOptionPane.PLAIN_MESSAGE);
+            
+        if (input == null || input.trim().isEmpty()) return;
+        
+        String[] lines = input.trim().split("\n");
+        List<Grade> gradesToSave = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (line.isEmpty()) continue;
+            
+            String[] parts = line.split(",");
+            if (parts.length < 4) {
+                errors.add("Line " + (i + 1) + ": Invalid format");
+                continue;
+            }
+            
+            try {
+                Grade g = new Grade();
+                g.setGradeType(parts[0].trim());
+                g.setScore(Double.parseDouble(parts[1].trim()));
+                g.setMaxScore(Double.parseDouble(parts[2].trim()));
+                g.setWeight(Double.parseDouble(parts[3].trim()));
+                g.setRemarks(parts.length > 4 ? parts[4].trim() : "");
+                
+                Enrollment e = new Enrollment();
+                e.setId(selectedEnrollmentId);
+                g.setEnrollment(e);
+                
+                gradesToSave.add(g);
+            } catch (NumberFormatException ex) {
+                errors.add("Line " + (i + 1) + ": Invalid number format");
+            }
+        }
+        
+        if (!errors.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Errors found:\n" + String.join("\n", errors), 
+                "Bulk Save Errors", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        
+        try {
+            for (Grade g : gradesToSave) {
+                gradeDAO.insert(g);
+            }
+            JOptionPane.showMessageDialog(this, "Successfully saved " + gradesToSave.size() + " grades!", 
+                "Bulk Save Complete", JOptionPane.INFORMATION_MESSAGE);
+            loadGrades();
+            clearForm();
+        } catch (Exception ex) {
+            showError(ex);
+        }
+    }
+    
+    private void importGradesFromCSV() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setFileFilter(new FileNameExtensionFilter("CSV Files", "csv"));
+        
+        if (fileChooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        
+        File file = fileChooser.getSelectedFile();
+        List<String> errors = new ArrayList<>();
+        int successCount = 0;
+        
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            String line;
+            int lineNum = 0;
+            
+            // Skip header line
+            br.readLine();
+            lineNum++;
+            
+            while ((line = br.readLine()) != null) {
+                lineNum++;
+                if (line.trim().isEmpty()) continue;
+                
+                String[] parts = line.split(",");
+                if (parts.length < 6) {
+                    errors.add("Line " + lineNum + ": Missing columns");
+                    continue;
+                }
+                
+                try {
+                    String studentNo = parts[0].trim();
+                    String gradeType = parts[1].trim();
+                    double score = Double.parseDouble(parts[2].trim());
+                    double maxScore = Double.parseDouble(parts[3].trim());
+                    double weight = Double.parseDouble(parts[4].trim());
+                    String remarks = parts[5].trim();
+                    
+                    // Find enrollment ID by student number
+                    int enrollmentId = findEnrollmentByStudentNo(studentNo);
+                    if (enrollmentId < 0) {
+                        errors.add("Line " + lineNum + ": Student not found: " + studentNo);
+                        continue;
+                    }
+                    
+                    Grade g = new Grade();
+                    g.setGradeType(gradeType);
+                    g.setScore(score);
+                    g.setMaxScore(maxScore);
+                    g.setWeight(weight);
+                    g.setRemarks(remarks);
+                    
+                    Enrollment e = new Enrollment();
+                    e.setId(enrollmentId);
+                    g.setEnrollment(e);
+                    
+                    gradeDAO.insert(g);
+                    successCount++;
+                    
+                } catch (NumberFormatException ex) {
+                    errors.add("Line " + lineNum + ": Invalid number format");
+                } catch (Exception ex) {
+                    errors.add("Line " + lineNum + ": " + ex.getMessage());
+                }
+            }
+            
+            String message = "Import complete!\nSuccessfully imported: " + successCount + " grades";
+            if (!errors.isEmpty()) {
+                message += "\nErrors: " + errors.size() + " (see details below)\n\n" + 
+                          String.join("\n", errors.subList(0, Math.min(errors.size(), 10)));
+                if (errors.size() > 10) {
+                    message += "\n... and " + (errors.size() - 10) + " more errors";
+                }
+            }
+            
+            JOptionPane.showMessageDialog(this, message, "Import Results", 
+                errors.isEmpty() ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.WARNING_MESSAGE);
+            
+            loadGrades();
+            
+        } catch (IOException ex) {
+            showError(ex);
+        }
+    }
+    
+    private void exportGradesToCSV() {
+        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
+        if (ci == null) {
+            JOptionPane.showMessageDialog(this, "Select a course first.", "Export", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setFileFilter(new FileNameExtensionFilter("CSV Files", "csv"));
+        fileChooser.setSelectedFile(new File("grades_export.csv"));
+        
+        if (fileChooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        
+        File file = fileChooser.getSelectedFile();
+        
+        try (PrintWriter pw = new PrintWriter(new FileWriter(file))) {
+            pw.println("Student No,Student Name,Grade Type,Score,Max Score,Weight,Weighted %,Letter Grade,Remarks");
+            
+            String sql = "SELECT s.student_no, s.first_name, s.last_name, g.grade_type, " +
+                        "g.score, g.max_score, g.weight, g.remarks " +
+                        "FROM enrollments e " +
+                        "JOIN students s ON s.id = e.student_id " +
+                        "LEFT JOIN grades g ON g.enrollment_id = e.id " +
+                        "WHERE e.course_id = ? " +
+                        "ORDER BY s.student_no, g.grade_type";
+                        
+            try (Connection conn = DBConnection.getConnection();
+                 PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, ci.id);
+                
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String studentNo = rs.getString("student_no");
+                        String studentName = rs.getString("first_name") + " " + rs.getString("last_name");
+                        String gradeType = rs.getString("grade_type");
+                        
+                        if (gradeType != null) { // Has grades
+                            double score = rs.getDouble("score");
+                            double maxScore = rs.getDouble("max_score");
+                            double weight = rs.getDouble("weight");
+                            String remarks = rs.getString("remarks");
+                            
+                            double weighted = maxScore > 0 ? (score / maxScore) * 100 * weight : 0;
+                            double pct = maxScore > 0 ? (score / maxScore) * 100 : 0;
+                            String letterGrade = toLetterGrade(pct);
+                            
+                            pw.printf("%s,%s,%s,%.2f,%.2f,%.2f,%.2f,%s,%s%n",
+                                studentNo, studentName, gradeType, score, maxScore, weight, 
+                                weighted, letterGrade, remarks != null ? remarks : "");
+                        } else { // No grades yet
+                            pw.printf("%s,%s,,,,,,,,%n", studentNo, studentName);
+                        }
+                    }
+                }
+            }
+            
+            JOptionPane.showMessageDialog(this, "Grades exported successfully to:\n" + file.getAbsolutePath(), 
+                "Export Complete", JOptionPane.INFORMATION_MESSAGE);
+                
+        } catch (Exception ex) {
+            showError(ex);
+        }
+    }
+    
+    private void applyGradeToAllStudents() {
+        if (!validateGradeInput()) {
+            JOptionPane.showMessageDialog(this, "Please fill in valid grade information first.", 
+                "Apply to All", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        
+        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
+        if (ci == null) return;
+        
+        int confirm = JOptionPane.showConfirmDialog(this, 
+            "Apply current grade to ALL students in this course?\n" +
+            "Type: " + cbGradeType.getSelectedItem() + "\n" +
+            "Score: " + tfScore.getText() + "/" + tfMaxScore.getText() + "\n" +
+            "Weight: " + tfWeight.getText(), 
+            "Confirm Apply to All", JOptionPane.YES_NO_OPTION);
+            
+        if (confirm != JOptionPane.YES_OPTION) return;
+        
+        try {
+            String sql = "SELECT id FROM enrollments WHERE course_id = ?";
+            List<Integer> enrollmentIds = new ArrayList<>();
+            
+            try (Connection conn = DBConnection.getConnection();
+                 PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, ci.id);
+                
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        enrollmentIds.add(rs.getInt("id"));
+                    }
+                }
+            }
+            
+            int successCount = 0;
+            for (int enrollmentId : enrollmentIds) {
+                try {
+                    Grade g = buildGradeFromForm();
+                    Enrollment e = new Enrollment();
+                    e.setId(enrollmentId);
+                    g.setEnrollment(e);
+                    
+                    gradeDAO.insert(g);
+                    successCount++;
+                } catch (Exception ex) {
+                    System.err.println("Failed to save grade for enrollment " + enrollmentId + ": " + ex.getMessage());
+                }
+            }
+            
+            JOptionPane.showMessageDialog(this, 
+                "Applied grade to " + successCount + " out of " + enrollmentIds.size() + " students.", 
+                "Apply Complete", JOptionPane.INFORMATION_MESSAGE);
+            
+            loadGrades();
+            clearForm();
+            
+        } catch (Exception ex) {
+            showError(ex);
+        }
+    }
+    
+    private int findEnrollmentByStudentNo(String studentNo) {
+        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
+        if (ci == null) return -1;
+        
+        String sql = "SELECT e.id FROM enrollments e " +
+                    "JOIN students s ON s.id = e.student_id " +
+                    "WHERE e.course_id = ? AND s.student_no = ?";
+                    
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, ci.id);
+            ps.setString(2, studentNo);
+            
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt("id");
+                }
+            }
+        } catch (SQLException ex) {
+            System.err.println("Error finding enrollment: " + ex.getMessage());
+        }
+        
+        return -1;
     }
 
     private static class CourseItem {
