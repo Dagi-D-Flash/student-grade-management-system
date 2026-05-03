@@ -1,844 +1,1156 @@
 package panels;
 
-import dao.EnrollmentDAO;
+import dao.GradeComponentDAO;
 import dao.GradeDAO;
 import models.Enrollment;
 import models.Grade;
+import models.GradeComponent;
 import models.User;
 import util.DBConnection;
+import util.GradeStructureService;
+import util.ThemeManager;
 
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
-import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
-import java.io.*;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.sql.*;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
+/**
+ * Enter Grades tab — full CRUD per student per course.
+ *
+ * Layout:
+ *   TOP    : course selector + refresh
+ *   LEFT   : student list (searchable) with their current total %
+ *   RIGHT  : grade form — one row per component, pre-filled from DB
+ *            Buttons: Save All | Delete All Grades | Delete Selected Component Grade
+ */
 public class TeacherGradePanel extends JPanel {
 
-    private final GradeDAO gradeDAO = new GradeDAO();
-    private final EnrollmentDAO enrollmentDAO = new EnrollmentDAO();
+    private final GradeDAO          gradeDAO     = new GradeDAO();
+    private final GradeComponentDAO componentDAO = new GradeComponentDAO();
     private final User teacher;
 
+    // ── top bar ───────────────────────────────────────────────────────────────
     private JComboBox<CourseItem> cbCourse;
+    private JLabel hintLabel;
+    private JTabbedPane tabs;
+
+    // ── structure tab ─────────────────────────────────────────────────────────
+    private JTable structTable;
+    private DefaultTableModel structModel;
+    private JTextField tfCompName, tfWeight, tfMaxScore;
+    private JLabel lblTotalWeight, lblStructStatus;
+    private JButton btnAddComp, btnUpdateComp, btnDeleteComp, btnClearComp;
+    private int selectedCompId = -1;
+
+    // ── grades tab — student list ─────────────────────────────────────────────
     private JTable studentTable;
     private DefaultTableModel studentModel;
-    private JTable gradeTable;
-    private DefaultTableModel gradeModel;
+    private final List<Object[]> allStudentRows = new ArrayList<>();
 
-    private JTextField tfScore, tfMaxScore, tfWeight, tfRemarks;
-    private JComboBox<String> cbGradeType;
-    private JLabel lblTotalMarks, lblGradeLetter, lblGradePoint;
-    private JButton btnSave, btnUpdate, btnDelete, btnClear;
-    
-    // Bulk operations and auto-save components
-    private JButton btnBulkSave, btnImportCSV, btnExportCSV, btnApplyToAll;
-    private JCheckBox chkAutoSave;
-    private Timer autoSaveTimer;
-    private boolean hasUnsavedChanges = false;
+    // ── grades tab — grade form ───────────────────────────────────────────────
+    private JPanel gradeFormPanel;          // holds the dynamic component rows
+    private JScrollPane gradeFormScroll;
+    private JLabel lblSelectedStudent;
+    private JLabel lblGradeStatus;
+    private JButton btnSaveAll, btnDeleteAll;
+
+    // component id → {scoreField, remarksField, deleteBtn, gradeId-holder}
+    private final Map<Integer, ComponentRow> componentRows = new LinkedHashMap<>();
 
     private int selectedEnrollmentId = -1;
-    private int selectedGradeId = -1;
+    private int currentCourseId      = -1;
+
+    // ── constructor ───────────────────────────────────────────────────────────
 
     public TeacherGradePanel(User teacher) {
         this.teacher = teacher;
         setLayout(new BorderLayout(8, 8));
-        setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
-        setBackground(new Color(245, 246, 250));
+        setBorder(ThemeManager.panelBorder());
+        setBackground(ThemeManager.bg());
 
-        add(buildTopBar(),     BorderLayout.NORTH);
-        add(buildCenterSplit(), BorderLayout.CENTER);
-        add(buildFormPanel(),  BorderLayout.SOUTH);
+        add(buildTopBar(), BorderLayout.NORTH);
+
+        tabs = new JTabbedPane();
+        tabs.setFont(ThemeManager.fontBold());
+        tabs.addTab("\uD83D\uDCCB  Grade Structure", buildStructureTab());
+        tabs.addTab("\u270F\uFE0F  Enter Grades",    buildGradesTab());
+        add(tabs, BorderLayout.CENTER);
 
         loadCourses();
-        initializeAutoSave();
     }
 
+    public void setSidebarExpanded(boolean expanded) {
+        if (hintLabel != null) hintLabel.setVisible(expanded);
+    }
+
+    /**
+     * Switches to the "Enter Grades" tab and selects the student matching
+     * the given student number. Called from My Students on double-click.
+     */
+    public void selectStudentByNo(String studentNo) {
+        // Switch to the grades tab (index 1)
+        if (tabs != null) tabs.setSelectedIndex(1);
+        // Find and select the matching row in the student list
+        SwingUtilities.invokeLater(() -> {
+            for (int i = 0; i < studentModel.getRowCount(); i++) {
+                if (studentNo.equals(studentModel.getValueAt(i, 1))) {
+                    studentTable.setRowSelectionInterval(i, i);
+                    studentTable.scrollRectToVisible(studentTable.getCellRect(i, 0, true));
+                    return;
+                }
+            }
+            // If not visible (filtered), search in allStudentRows and reload
+            for (Object[] row : allStudentRows) {
+                if (studentNo.equals(row[1])) {
+                    // Clear search filter and re-select
+                    studentModel.setRowCount(0);
+                    for (Object[] r : allStudentRows) studentModel.addRow(r);
+                    for (int i = 0; i < studentModel.getRowCount(); i++) {
+                        if (studentNo.equals(studentModel.getValueAt(i, 1))) {
+                            studentTable.setRowSelectionInterval(i, i);
+                            studentTable.scrollRectToVisible(studentTable.getCellRect(i, 0, true));
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // TOP BAR
+    // ═════════════════════════════════════════════════════════════════════════
+
     private JPanel buildTopBar() {
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
-        bar.setBackground(Color.WHITE);
-        bar.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(220, 220, 220)),
-            BorderFactory.createEmptyBorder(4, 8, 4, 8)
-        ));
-        
-        bar.add(new JLabel("Course:"));
+        JPanel bar = new JPanel(new BorderLayout(10, 0));
+        bar.setBackground(ThemeManager.surface());
+        bar.setBorder(ThemeManager.cardBorder());
+
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 4));
+        left.setOpaque(false);
+
+        JLabel lbl = new JLabel("Course:");
+        lbl.setFont(ThemeManager.fontBold());
+        lbl.setForeground(ThemeManager.text());
+        left.add(lbl);
+
         cbCourse = new JComboBox<>();
-        cbCourse.setPreferredSize(new Dimension(320, 28));
-        cbCourse.addActionListener(e -> loadStudents());
-        bar.add(cbCourse);
-        
-        // Add bulk operations buttons
-        btnBulkSave = styledBtn("Bulk Save", new Color(255, 193, 7));
-        btnBulkSave.setForeground(Color.BLACK);
-        btnImportCSV = styledBtn("Import CSV", new Color(111, 66, 193));
-        btnExportCSV = styledBtn("Export CSV", new Color(32, 201, 151));
-        btnApplyToAll = styledBtn("Apply to All", new Color(253, 126, 20));
-        btnApplyToAll.setForeground(Color.BLACK);
-        
-        btnBulkSave.addActionListener(e -> bulkSaveGrades());
-        btnImportCSV.addActionListener(e -> importGradesFromCSV());
-        btnExportCSV.addActionListener(e -> exportGradesToCSV());
-        btnApplyToAll.addActionListener(e -> applyGradeToAllStudents());
-        
-        bar.add(Box.createHorizontalStrut(20));
-        bar.add(btnBulkSave);
-        bar.add(btnImportCSV);
-        bar.add(btnExportCSV);
-        bar.add(btnApplyToAll);
-        
-        // Auto-save checkbox
-        chkAutoSave = new JCheckBox("Auto-save");
-        chkAutoSave.setBackground(Color.WHITE);
-        chkAutoSave.addActionListener(e -> toggleAutoSave());
-        bar.add(Box.createHorizontalStrut(20));
-        bar.add(chkAutoSave);
-        
+        cbCourse.setPreferredSize(new Dimension(420, 30));
+        cbCourse.addActionListener(e -> onCourseChanged());
+        left.add(cbCourse);
+
+        JButton btnRefresh = ThemeManager.secondaryButton("\u21BB Refresh");
+        btnRefresh.addActionListener(e -> loadCourses());
+        left.add(btnRefresh);
+
+        hintLabel = new JLabel("\u2190 Collapse sidebar for more space");
+        hintLabel.setFont(ThemeManager.fontSmall());
+        hintLabel.setForeground(ThemeManager.muted());
+
+        bar.add(left,      BorderLayout.WEST);
+        bar.add(hintLabel, BorderLayout.EAST);
         return bar;
     }
 
-    private JSplitPane buildCenterSplit() {
-        studentModel = new DefaultTableModel(
-            new String[]{"Enrollment ID", "Student No", "Student Name", "Status"}, 0) {
-            public boolean isCellEditable(int r, int c) { return false; }
-        };
-        studentTable = new JTable(studentModel);
-        studentTable.setRowHeight(26);
-        studentTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        studentTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
-        studentTable.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        studentTable.getSelectionModel().addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting()) onStudentSelected();
-        });
-
-        gradeModel = new DefaultTableModel(
-            new String[]{"Grade ID", "Type", "Score", "Max Score", "Weight", "Weighted %", "Remarks"}, 0) {
-            public boolean isCellEditable(int r, int c) { return false; }
-        };
-        gradeTable = new JTable(gradeModel);
-        gradeTable.setRowHeight(26);
-        gradeTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        gradeTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
-        gradeTable.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        gradeTable.getSelectionModel().addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting()) onGradeSelected();
-        });
-
-        JPanel leftPanel = new JPanel(new BorderLayout());
-        leftPanel.setBorder(BorderFactory.createTitledBorder("Enrolled Students"));
-        leftPanel.add(new JScrollPane(studentTable));
-
-        JPanel rightPanel = new JPanel(new BorderLayout());
-        rightPanel.setBorder(BorderFactory.createTitledBorder("Grades for Selected Student"));
-        rightPanel.add(new JScrollPane(gradeTable));
-
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, rightPanel);
-        split.setDividerLocation(380);
-        split.setResizeWeight(0.4);
-        return split;
+    private void onCourseChanged() {
+        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
+        currentCourseId      = ci != null ? ci.id : -1;
+        selectedEnrollmentId = -1;
+        loadStructure();
+        loadStudentList();
+        clearGradeForm("Select a student from the list to view or enter grades.");
     }
 
-    private JPanel buildFormPanel() {
-        JPanel wrapper = new JPanel(new BorderLayout(10, 0));
-        wrapper.setBackground(Color.WHITE);
-        wrapper.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(220, 220, 220)),
-            BorderFactory.createEmptyBorder(12, 12, 12, 12)
-        ));
+    // ═════════════════════════════════════════════════════════════════════════
+    // STRUCTURE TAB  (unchanged logic, kept intact)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private JPanel buildStructureTab() {
+        JPanel panel = new JPanel(new BorderLayout(10, 10));
+        panel.setBackground(ThemeManager.bg());
+        panel.setBorder(new EmptyBorder(12, 12, 12, 12));
+
+        JLabel info = new JLabel(
+            "<html><b>Define grade components for this course.</b> " +
+            "Total weight MUST equal exactly 100%. " +
+            "All enrolled students share the same structure.</html>");
+        info.setFont(ThemeManager.fontSmall());
+        info.setForeground(ThemeManager.muted());
+        info.setBorder(new EmptyBorder(0, 0, 8, 0));
+        panel.add(info, BorderLayout.NORTH);
+
+        structModel = new DefaultTableModel(
+                new String[]{"ID", "Component Name", "Weight (%)", "Max Score"}, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+        structTable = new JTable(structModel);
+        ThemeManager.styleTable(structTable);
+        structTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        structTable.getColumnModel().getColumn(0).setMaxWidth(50);
+        structTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) onComponentSelected();
+        });
+
+        JPanel tableWrapper = new JPanel(new BorderLayout());
+        tableWrapper.setBackground(ThemeManager.surface());
+        tableWrapper.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(ThemeManager.border()), "Current Grade Structure"));
+        tableWrapper.add(new JScrollPane(structTable));
+
+        JPanel form = new JPanel(new BorderLayout(10, 6));
+        form.setBackground(ThemeManager.surface());
+        form.setBorder(ThemeManager.cardBorder());
 
         JPanel fields = new JPanel(new GridBagLayout());
         fields.setOpaque(false);
         GridBagConstraints g = new GridBagConstraints();
         g.insets = new Insets(4, 6, 4, 6);
-        g.fill = GridBagConstraints.HORIZONTAL;
+        g.fill   = GridBagConstraints.HORIZONTAL;
 
-        cbGradeType = new JComboBox<>(new String[]{"quiz", "assignment", "midterm", "final", "project"});
-        tfScore     = new JTextField(7);
-        tfMaxScore  = new JTextField(7);
-        tfWeight    = new JTextField(5);
-        tfRemarks   = new JTextField(14);
-
-        lblTotalMarks  = new JLabel("—");
-        lblGradeLetter = new JLabel("—");
-        lblGradePoint  = new JLabel("—");
-
-        lblTotalMarks.setFont(new Font("SansSerif", Font.BOLD, 13));
-        lblGradeLetter.setFont(new Font("SansSerif", Font.BOLD, 13));
-        lblGradePoint.setFont(new Font("SansSerif", Font.BOLD, 13));
-        lblGradeLetter.setForeground(new Color(13, 110, 253));
+        tfCompName = styledField(); tfWeight = styledField(); tfMaxScore = styledField();
+        lblTotalWeight  = new JLabel("Total weight: 0 / 100");
+        lblTotalWeight.setFont(ThemeManager.fontBold());
+        lblStructStatus = new JLabel(" ");
+        lblStructStatus.setFont(ThemeManager.fontSmall());
 
         g.gridy = 0; g.gridwidth = 1; g.weightx = 0;
-        g.gridx = 0; fields.add(new JLabel("Grade Type:"), g);
-        g.gridx = 1; g.weightx = 0.15; fields.add(cbGradeType, g);
-        g.gridx = 2; g.weightx = 0; fields.add(new JLabel("Score:"), g);
-        g.gridx = 3; g.weightx = 0.1; fields.add(tfScore, g);
-        g.gridx = 4; g.weightx = 0; fields.add(new JLabel("Max Score:"), g);
-        g.gridx = 5; g.weightx = 0.1; fields.add(tfMaxScore, g);
-        g.gridx = 6; g.weightx = 0; fields.add(new JLabel("Weight:"), g);
-        g.gridx = 7; g.weightx = 0.08; fields.add(tfWeight, g);
-        g.gridx = 8; g.weightx = 0; fields.add(new JLabel("Remarks:"), g);
-        g.gridx = 9; g.weightx = 0.2; fields.add(tfRemarks, g);
+        g.gridx = 0; fields.add(lbl("Component Name *"), g);
+        g.gridx = 1; g.weightx = 0.35; fields.add(tfCompName, g);
+        g.gridx = 2; g.weightx = 0;    fields.add(lbl("Weight % *"), g);
+        g.gridx = 3; g.weightx = 0.15; fields.add(tfWeight, g);
+        g.gridx = 4; g.weightx = 0;    fields.add(lbl("Max Score *"), g);
+        g.gridx = 5; g.weightx = 0.15; fields.add(tfMaxScore, g);
+        g.gridx = 6; g.weightx = 0.2;  fields.add(lblTotalWeight, g);
 
-        g.gridy = 1; g.weightx = 0;
-        g.gridx = 0; fields.add(new JLabel("Weighted %:"), g);
-        g.gridx = 1; fields.add(lblTotalMarks, g);
-        g.gridx = 2; fields.add(new JLabel("Letter Grade:"), g);
-        g.gridx = 3; fields.add(lblGradeLetter, g);
-        g.gridx = 4; fields.add(new JLabel("Grade Point:"), g);
-        g.gridx = 5; fields.add(lblGradePoint, g);
+        g.gridy = 1; g.gridx = 0; g.gridwidth = 7; g.weightx = 1;
+        fields.add(lblStructStatus, g);
 
-        tfScore.getDocument().addDocumentListener(new SimpleDocListener(this::recalculate));
-        tfMaxScore.getDocument().addDocumentListener(new SimpleDocListener(this::recalculate));
-        tfWeight.getDocument().addDocumentListener(new SimpleDocListener(this::recalculate));
-        
-        // Add auto-save listeners
-        tfScore.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
-        tfMaxScore.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
-        tfWeight.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
-        tfRemarks.getDocument().addDocumentListener(new SimpleDocListener(this::markUnsavedChanges));
+        JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        btnRow.setOpaque(false);
+        btnAddComp    = ThemeManager.primaryButton("Add Component");
+        btnUpdateComp = ThemeManager.primaryButton("Update");
+        btnDeleteComp = ThemeManager.dangerButton("Delete");
+        btnClearComp  = ThemeManager.secondaryButton("Clear");
+        btnRow.add(btnAddComp); btnRow.add(btnUpdateComp);
+        btnRow.add(btnDeleteComp); btnRow.add(btnClearComp);
 
-        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
-        btnPanel.setOpaque(false);
-        btnSave   = styledBtn("Save",   new Color(25, 135, 84));
-        btnUpdate = styledBtn("Update", new Color(13, 110, 253));
-        btnDelete = styledBtn("Delete", new Color(220, 53, 69));
-        btnClear  = styledBtn("Clear",  new Color(108, 117, 125));
-        btnPanel.add(btnSave); btnPanel.add(btnUpdate); btnPanel.add(btnDelete); btnPanel.add(btnClear);
+        btnAddComp.addActionListener(e    -> addComponent());
+        btnUpdateComp.addActionListener(e -> updateComponent());
+        btnDeleteComp.addActionListener(e -> deleteComponent());
+        btnClearComp.addActionListener(e  -> clearCompForm());
 
-        btnSave.addActionListener(e -> saveGrade());
-        btnUpdate.addActionListener(e -> updateGrade());
-        btnDelete.addActionListener(e -> deleteGrade());
-        btnClear.addActionListener(e -> clearForm());
+        form.add(fields, BorderLayout.CENTER);
+        form.add(btnRow, BorderLayout.EAST);
 
-        wrapper.add(fields, BorderLayout.CENTER);
-        wrapper.add(btnPanel, BorderLayout.EAST);
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tableWrapper, form);
+        split.setDividerLocation(260);
+        split.setResizeWeight(0.6);
+        split.setBorder(null);
+        panel.add(split, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private void loadStructure() {
+        structModel.setRowCount(0);
+        if (currentCourseId < 0) return;
+        try {
+            List<GradeComponent> list = componentDAO.getByCourseId(currentCourseId);
+            double total = 0;
+            for (GradeComponent c : list) {
+                structModel.addRow(new Object[]{c.getId(), c.getComponentName(), c.getWeight(), c.getMaxScore()});
+                total += c.getWeight();
+            }
+            updateTotalWeightLabel(total);
+        } catch (SQLException ex) { System.err.println("loadStructure: " + ex.getMessage()); }
+    }
+
+    private void onComponentSelected() {
+        int row = structTable.getSelectedRow();
+        if (row < 0) return;
+        selectedCompId = (int) structModel.getValueAt(row, 0);
+        tfCompName.setText(structModel.getValueAt(row, 1).toString());
+        tfWeight.setText(structModel.getValueAt(row, 2).toString());
+        tfMaxScore.setText(structModel.getValueAt(row, 3).toString());
+        setStructStatus("", false);
+    }
+
+    private void addComponent() {
+        if (currentCourseId < 0) { setStructStatus("Select a course first.", true); return; }
+        String err = validateCompForm(false);
+        if (err != null) { setStructStatus(err, true); return; }
+        try {
+            componentDAO.insert(buildComponent());
+            loadStructure(); clearCompForm();
+            setStructStatus("Component added.", false);
+        } catch (SQLException ex) { showError(ex.getMessage()); }
+    }
+
+    private void updateComponent() {
+        if (selectedCompId < 0) { setStructStatus("Select a component first.", true); return; }
+        String err = validateCompForm(true);
+        if (err != null) { setStructStatus(err, true); return; }
+        try {
+            GradeComponent updated = buildComponent();
+            updated.setId(selectedCompId);
+
+            // Delegate entirely to the service — one atomic transaction
+            GradeStructureService.UpdateResult result =
+                GradeStructureService.updateComponent(updated);
+
+            if (!result.success) {
+                setStructStatus(result.message, true);
+                return;
+            }
+
+            // Refresh everything instantly
+            loadStructure();
+            clearCompForm();
+            loadStudentList();                               // refresh Total% for all students
+            if (selectedEnrollmentId >= 0) loadGradeForm(); // refresh open student's scores
+
+            setStructStatus(result.message, false);
+
+        } catch (SQLException ex) { showError(ex.getMessage()); }
+    }
+
+    private void deleteComponent() {
+        if (selectedCompId < 0) { setStructStatus("Select a component first.", true); return; }
+        int ok = JOptionPane.showConfirmDialog(this,
+                "Delete component \"" + tfCompName.getText() + "\"?\n" +
+                "All student grades for this component will also be deleted.",
+                "Confirm Delete", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+        try {
+            componentDAO.delete(selectedCompId);
+            loadStructure(); clearCompForm();
+            setStructStatus("Component deleted.", false);
+        } catch (SQLException ex) { showError(ex.getMessage()); }
+    }
+
+    private GradeComponent buildComponent() {
+        GradeComponent c = new GradeComponent();
+        c.setCourseId(currentCourseId);
+        c.setComponentName(tfCompName.getText().trim());
+        c.setWeight(parseDouble(tfWeight.getText()));
+        c.setMaxScore(parseDouble(tfMaxScore.getText()));
+        return c;
+    }
+
+    private String validateCompForm(boolean isUpdate) {
+        String name = tfCompName.getText().trim();
+        String wStr = tfWeight.getText().trim();
+        String msStr = tfMaxScore.getText().trim();
+        if (name.isEmpty())  return "Component name is required.";
+        if (wStr.isEmpty())  return "Weight is required.";
+        if (msStr.isEmpty()) return "Max score is required.";
+        double w  = parseDouble(wStr);
+        double ms = parseDouble(msStr);
+        if (w <= 0 || w > 100) return "Weight must be between 0.01 and 100.";
+        if (ms <= 0)           return "Max score must be greater than 0.";
+        if (ms > 100)          return "Max score cannot exceed 100.";
+        try {
+            if (componentDAO.existsByName(currentCourseId, name, isUpdate ? selectedCompId : -1))
+                return "A component named \"" + name + "\" already exists for this course.";
+            double existing  = componentDAO.getTotalWeight(currentCourseId, isUpdate ? selectedCompId : -1);
+            double projected = existing + w;
+            if (projected > 100)
+                return String.format("Total weight would be %.1f%% (exceeds 100%%). Available: %.1f%%.",
+                        projected, 100 - existing);
+        } catch (SQLException ex) { return "DB error: " + ex.getMessage(); }
+        return null;
+    }
+
+    private void updateTotalWeightLabel(double total) {
+        lblTotalWeight.setText(String.format("Total weight: %.0f / 100", total));
+        lblTotalWeight.setForeground(Math.abs(total - 100) < 0.01 ? ThemeManager.SUCCESS : ThemeManager.WARNING);
+    }
+
+    private void clearCompForm() {
+        selectedCompId = -1;
+        tfCompName.setText(""); tfWeight.setText(""); tfMaxScore.setText("");
+        structTable.clearSelection();
+        setStructStatus("", false);
+    }
+
+    private void setStructStatus(String msg, boolean error) {
+        lblStructStatus.setText(msg.isEmpty() ? " " : msg);
+        lblStructStatus.setForeground(error ? ThemeManager.danger() : ThemeManager.SUCCESS);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // GRADES TAB  — split: student list (left) | grade form (right)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private JPanel buildGradesTab() {
+        JPanel panel = new JPanel(new BorderLayout(10, 10));
+        panel.setBackground(ThemeManager.bg());
+        panel.setBorder(new EmptyBorder(12, 12, 12, 12));
+
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+                buildStudentListPanel(), buildGradeFormPanel());
+        split.setDividerLocation(340);
+        split.setResizeWeight(0.3);
+        split.setBorder(null);
+        panel.add(split, BorderLayout.CENTER);
+        return panel;
+    }
+
+    // ── Left: student list ────────────────────────────────────────────────────
+
+    private JPanel buildStudentListPanel() {
+        // Columns: [0] enrollId (hidden), [1] studentNo, [2] name, [3] total%, [4] status
+        studentModel = new DefaultTableModel(
+                new String[]{"#", "Student No", "Student Name", "Total %", "Status"}, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+        studentTable = new JTable(studentModel);
+        ThemeManager.styleTable(studentTable);
+        studentTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        studentTable.setRowHeight(24);
+
+        // hide internal enroll-id column
+        studentTable.getColumnModel().getColumn(0).setMinWidth(0);
+        studentTable.getColumnModel().getColumn(0).setMaxWidth(0);
+        studentTable.getColumnModel().getColumn(0).setWidth(0);
+
+        // colour the Total% column
+        studentTable.getColumnModel().getColumn(3).setCellRenderer(totalPctRenderer());
+
+        studentTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) onStudentSelected();
+        });
+
+        // search bar
+        JTextField tfSearch = new JTextField();
+        tfSearch.setBackground(ThemeManager.elevated());
+        tfSearch.setForeground(ThemeManager.text());
+        tfSearch.setCaretColor(ThemeManager.text());
+        tfSearch.setFont(ThemeManager.fontBody());
+        tfSearch.putClientProperty("JTextField.placeholderText", "Search by name or student ID...");
+        tfSearch.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e)  { filterStudents(tfSearch.getText()); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e)  { filterStudents(tfSearch.getText()); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { filterStudents(tfSearch.getText()); }
+        });
+
+        JPanel searchBar = new JPanel(new BorderLayout(4, 0));
+        searchBar.setOpaque(false);
+        searchBar.setBorder(new EmptyBorder(0, 0, 4, 0));
+        JLabel icon = new JLabel("\uD83D\uDD0D");
+        icon.setFont(new Font("SansSerif", Font.PLAIN, 14));
+        searchBar.add(icon,     BorderLayout.WEST);
+        searchBar.add(tfSearch, BorderLayout.CENTER);
+
+        JPanel wrapper = new JPanel(new BorderLayout());
+        wrapper.setBackground(ThemeManager.surface());
+        wrapper.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(ThemeManager.border()), "Enrolled Students"));
+        wrapper.add(searchBar,                     BorderLayout.NORTH);
+        wrapper.add(new JScrollPane(studentTable), BorderLayout.CENTER);
         return wrapper;
     }
 
+    // ── Right: grade form ─────────────────────────────────────────────────────
+
+    private JPanel buildGradeFormPanel() {
+        JPanel outer = new JPanel(new BorderLayout(0, 8));
+        outer.setBackground(ThemeManager.surface());
+        outer.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(ThemeManager.border()), "Grade Entry"));
+
+        // header: student name + status label
+        JPanel header = new JPanel(new BorderLayout(8, 0));
+        header.setOpaque(false);
+        header.setBorder(new EmptyBorder(6, 10, 4, 10));
+
+        lblSelectedStudent = new JLabel("No student selected");
+        lblSelectedStudent.setFont(ThemeManager.fontBold());
+        lblSelectedStudent.setForeground(ThemeManager.text());
+
+        lblGradeStatus = new JLabel(" ");
+        lblGradeStatus.setFont(ThemeManager.fontSmall());
+        lblGradeStatus.setForeground(ThemeManager.muted());
+
+        header.add(lblSelectedStudent, BorderLayout.WEST);
+        header.add(lblGradeStatus,     BorderLayout.EAST);
+
+        // scrollable form area — rebuilt dynamically per student
+        gradeFormPanel = new JPanel();
+        gradeFormPanel.setLayout(new BoxLayout(gradeFormPanel, BoxLayout.Y_AXIS));
+        gradeFormPanel.setBackground(ThemeManager.bg());
+        gradeFormPanel.setBorder(new EmptyBorder(8, 10, 8, 10));
+
+        gradeFormScroll = new JScrollPane(gradeFormPanel);
+        gradeFormScroll.setBorder(null);
+        gradeFormScroll.getViewport().setBackground(ThemeManager.bg());
+
+        // bottom action bar
+        JPanel bottom = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
+        bottom.setOpaque(false);
+        bottom.setBorder(new EmptyBorder(0, 0, 4, 4));
+
+        btnSaveAll  = ThemeManager.primaryButton("\uD83D\uDCBE  Save All Grades");
+        btnDeleteAll = ThemeManager.dangerButton("\uD83D\uDDD1  Delete All Grades");
+
+        btnSaveAll.addActionListener(e   -> saveAllGrades());
+        btnDeleteAll.addActionListener(e -> deleteAllGrades());
+
+        bottom.add(btnDeleteAll);
+        bottom.add(btnSaveAll);
+
+        outer.add(header,        BorderLayout.NORTH);
+        outer.add(gradeFormScroll, BorderLayout.CENTER);
+        outer.add(bottom,        BorderLayout.SOUTH);
+
+        // show placeholder message
+        showFormPlaceholder("Select a student from the list to view or enter grades.");
+        return outer;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // STUDENT LIST HELPERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void loadStudentList() {
+        studentModel.setRowCount(0);
+        allStudentRows.clear();
+        if (currentCourseId < 0) return;
+
+        // Join grades through course_grade_components to ensure we only sum
+        // grades that belong to THIS course — not grades from other courses
+        // that happen to share the same enrollment_id in the seed data.
+        String sql =
+            "SELECT e.id AS enroll_id, s.student_no, " +
+            "       s.first_name, s.last_name, e.status, " +
+            "       SUM((g.score / cgc.max_score) * cgc.weight) AS total_pct " +
+            "FROM enrollments e " +
+            "JOIN students s ON s.id = e.student_id " +
+            "LEFT JOIN grades g ON g.enrollment_id = e.id " +
+            "LEFT JOIN course_grade_components cgc " +
+            "       ON cgc.id = g.component_id AND cgc.course_id = e.course_id " +
+            "WHERE e.course_id = ? " +
+            "GROUP BY e.id, s.student_no, s.first_name, s.last_name, e.status " +
+            "ORDER BY s.first_name, s.last_name";
+
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, currentCourseId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    double total      = rs.getDouble("total_pct");
+                    boolean hasGrades = !rs.wasNull();
+                    String fullName   = rs.getString("first_name") + " " + rs.getString("last_name");
+                    Object[] row = {
+                        rs.getInt("enroll_id"),
+                        rs.getString("student_no"),
+                        fullName,
+                        hasGrades ? String.format("%.1f%%", total) : "—",
+                        rs.getString("status")
+                    };
+                    allStudentRows.add(row);
+                    studentModel.addRow(row);
+                }
+            }
+        } catch (SQLException ex) { System.err.println("loadStudentList: " + ex.getMessage()); }
+    }
+
+    private void filterStudents(String query) {
+        // Preserve the currently selected enrollment so selection survives filtering
+        int prevEnrollId = selectedEnrollmentId;
+
+        studentModel.setRowCount(0);
+        String q = query.trim().toLowerCase();
+        for (Object[] row : allStudentRows) {
+            String no   = row[1].toString().toLowerCase();
+            String name = row[2].toString().toLowerCase();
+            if (q.isEmpty() || no.contains(q) || name.contains(q))
+                studentModel.addRow(row);
+        }
+
+        // Re-select the previously selected student if still visible
+        if (prevEnrollId >= 0) {
+            for (int i = 0; i < studentModel.getRowCount(); i++) {
+                if (((Number) studentModel.getValueAt(i, 0)).intValue() == prevEnrollId) {
+                    studentTable.setRowSelectionInterval(i, i);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void onStudentSelected() {
+        int row = studentTable.getSelectedRow();
+        if (row < 0) {
+            selectedEnrollmentId = -1;
+            clearGradeForm("Select a student from the list to view or enter grades.");
+            return;
+        }
+        selectedEnrollmentId = (int) studentModel.getValueAt(row, 0);
+        String studentName   = studentModel.getValueAt(row, 2).toString();
+        String studentNo     = studentModel.getValueAt(row, 1).toString();
+        lblSelectedStudent.setText(studentName + "  (" + studentNo + ")");
+        loadGradeForm();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // GRADE FORM — build / load / clear
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Rebuilds the grade form for the selected student.
+     * Each component gets its own row with:
+     *   Label | Score field (pre-filled from DB) | /MaxScore | Weighted% | Letter | Remarks | Delete btn
+     */
+    private void loadGradeForm() {
+        gradeFormPanel.removeAll();
+        componentRows.clear();
+
+        if (selectedEnrollmentId < 0 || currentCourseId < 0) {
+            showFormPlaceholder("Select a student to view grades.");
+            return;
+        }
+
+        List<GradeComponent> components;
+        Map<Integer, Grade> gradeMap = new LinkedHashMap<>();
+
+        try {
+            components = componentDAO.getByCourseId(currentCourseId);
+            if (components.isEmpty()) {
+                showFormPlaceholder("No grade components defined for this course.\nGo to the Grade Structure tab to add components.");
+                return;
+            }
+
+            // Fetch grades for this enrollment that belong to THIS course's components only.
+            // This is the critical join — without it, grades seeded for other courses
+            // (same enrollment_id but different component_id) pollute the map.
+            String sql =
+                "SELECT g.id, g.enrollment_id, g.component_id, g.grade_type, " +
+                "       g.score, g.remarks, g.graded_at " +
+                "FROM grades g " +
+                "JOIN course_grade_components cgc ON cgc.id = g.component_id " +
+                "WHERE g.enrollment_id = ? AND cgc.course_id = ?";
+
+            try (Connection conn = DBConnection.getConnection();
+                 PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, selectedEnrollmentId);
+                ps.setInt(2, currentCourseId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        Grade g = new Grade();
+                        g.setId(rs.getInt("id"));
+                        g.setComponentId(rs.getInt("component_id"));
+                        g.setGradeType(rs.getString("grade_type"));
+                        g.setScore(rs.getDouble("score"));
+                        g.setRemarks(rs.getString("remarks"));
+                        g.setGradedAt(rs.getTimestamp("graded_at"));
+                        Enrollment enr = new Enrollment();
+                        enr.setId(rs.getInt("enrollment_id"));
+                        g.setEnrollment(enr);
+                        gradeMap.put(g.getComponentId(), g);
+                    }
+                }
+            }
+
+        } catch (SQLException ex) {
+            showFormPlaceholder("Error loading grades: " + ex.getMessage());
+            return;
+        }
+
+        // ── column header row ─────────────────────────────────────────────────
+        JPanel headerRow = formRow(true);
+        headerRow.add(headerCell("Component",  160));
+        headerRow.add(headerCell("Score",       80));
+        headerRow.add(headerCell("/ Max",       55));
+        headerRow.add(headerCell("Weighted %",  80));
+        headerRow.add(headerCell("Letter",      55));
+        headerRow.add(headerCell("Remarks",    140));
+        headerRow.add(headerCell("",            80)); // delete button column
+        gradeFormPanel.add(headerRow);
+        gradeFormPanel.add(Box.createVerticalStrut(2));
+
+        // ── one row per component ─────────────────────────────────────────────
+        for (GradeComponent comp : components) {
+            // Look up from the pre-fetched map — no extra DB call per row
+            Grade existing = gradeMap.get(comp.getId());
+
+            // Score field — pre-filled with REAL score from DB, or empty if no grade yet
+            JTextField tfScore = inputField(80);
+            if (existing != null) {
+                // Show the actual saved score, not 0
+                tfScore.setText(formatScore(existing.getScore()));
+            } else {
+                tfScore.setText("");   // blank = no grade entered yet
+                tfScore.putClientProperty("JTextField.placeholderText", "0");
+            }
+
+            JTextField tfRemarks = inputField(140);
+            if (existing != null && existing.getRemarks() != null)
+                tfRemarks.setText(existing.getRemarks());
+
+            // computed display labels (update live as score is typed)
+            JLabel lblWeighted = valueLabel(existing != null
+                    ? String.format("%.2f", calcWeighted(existing.getScore(), comp)) : "—");
+            JLabel lblLetter   = letterLabel(existing != null
+                    ? toLetterGrade(calcPct(existing.getScore(), comp)) : "—");
+
+            // wire live recalc
+            final GradeComponent compFinal = comp;
+            tfScore.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+                public void insertUpdate(javax.swing.event.DocumentEvent e)  { recalcLabels(tfScore, compFinal, lblWeighted, lblLetter); }
+                public void removeUpdate(javax.swing.event.DocumentEvent e)  { recalcLabels(tfScore, compFinal, lblWeighted, lblLetter); }
+                public void changedUpdate(javax.swing.event.DocumentEvent e) { recalcLabels(tfScore, compFinal, lblWeighted, lblLetter); }
+            });
+
+            // delete button for this single component
+            JButton btnDel = ThemeManager.dangerButton("Delete");
+            btnDel.setFont(ThemeManager.fontSmall());
+            btnDel.setPreferredSize(new Dimension(72, 26));
+            final int gradeId = existing != null ? existing.getId() : -1;
+            btnDel.addActionListener(e -> deleteSingleGrade(comp, gradeId));
+            if (existing == null) {
+                btnDel.setEnabled(false);
+                btnDel.setToolTipText("No grade saved yet");
+            }
+
+            // store for save
+            componentRows.put(comp.getId(), new ComponentRow(comp, tfScore, tfRemarks, btnDel, gradeId));
+
+            // build the visual row
+            JPanel row = formRow(false);
+            row.add(compLabel(comp.getComponentName() + "  (max " + formatScore(comp.getMaxScore()) + ")", 160));
+            row.add(tfScore);
+            row.add(valueLabel("/ " + formatScore(comp.getMaxScore()), 55));
+            row.add(lblWeighted);
+            row.add(lblLetter);
+            row.add(tfRemarks);
+            row.add(btnDel);
+            gradeFormPanel.add(row);
+            gradeFormPanel.add(Box.createVerticalStrut(4));
+        }
+
+        // ── total row ─────────────────────────────────────────────────────────
+        gradeFormPanel.add(Box.createVerticalStrut(6));
+        JSeparator sep = new JSeparator();
+        sep.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+        sep.setForeground(ThemeManager.border());
+        gradeFormPanel.add(sep);
+        gradeFormPanel.add(Box.createVerticalStrut(4));
+
+        JPanel totalRow = formRow(false);
+        JLabel totalLbl = new JLabel("Total Score:");
+        totalLbl.setFont(ThemeManager.fontBold());
+        totalLbl.setForeground(ThemeManager.text());
+        totalLbl.setPreferredSize(new Dimension(160, 26));
+
+        double savedTotal = 0;
+        boolean anyGrade  = false;
+        for (ComponentRow cr : componentRows.values()) {
+            if (cr.gradeId > 0) {
+                String txt = cr.scoreField.getText().trim();
+                if (!txt.isEmpty()) { savedTotal += calcWeighted(parseDouble(txt), cr.component); anyGrade = true; }
+            }
+        }
+        JLabel totalVal = new JLabel(anyGrade ? String.format("%.2f / 100", savedTotal) : "—");
+        totalVal.setFont(new Font("SansSerif", Font.BOLD, 14));
+        totalVal.setForeground(anyGrade ? ThemeManager.accent() : ThemeManager.muted());
+
+        totalRow.add(totalLbl);
+        totalRow.add(totalVal);
+        gradeFormPanel.add(totalRow);
+
+        gradeFormPanel.revalidate();
+        gradeFormPanel.repaint();
+        setGradeStatus(" ", false);
+    }
+
+    private void showFormPlaceholder(String message) {
+        gradeFormPanel.removeAll();
+        componentRows.clear();
+        JLabel lbl = new JLabel("<html><center>" + message.replace("\n", "<br>") + "</center></html>");
+        lbl.setFont(ThemeManager.fontBody());
+        lbl.setForeground(ThemeManager.muted());
+        lbl.setHorizontalAlignment(SwingConstants.CENTER);
+        lbl.setAlignmentX(Component.CENTER_ALIGNMENT);
+        gradeFormPanel.add(Box.createVerticalGlue());
+        gradeFormPanel.add(lbl);
+        gradeFormPanel.add(Box.createVerticalGlue());
+        gradeFormPanel.revalidate();
+        gradeFormPanel.repaint();
+        if (lblSelectedStudent != null) lblSelectedStudent.setText("No student selected");
+        setGradeStatus(" ", false);
+    }
+
+    private void clearGradeForm(String message) {
+        selectedEnrollmentId = -1;
+        showFormPlaceholder(message);
+    }
+
+    // ── live recalc ───────────────────────────────────────────────────────────
+
+    private void recalcLabels(JTextField tfScore, GradeComponent comp,
+                               JLabel lblWeighted, JLabel lblLetter) {
+        String txt = tfScore.getText().trim();
+        if (txt.isEmpty()) {
+            lblWeighted.setText("—");
+            lblLetter.setText("—");
+            lblLetter.setForeground(ThemeManager.muted());
+            return;
+        }
+        double score    = parseDouble(txt);
+        double pct      = calcPct(score, comp);
+        double weighted = calcWeighted(score, comp);
+        lblWeighted.setText(String.format("%.2f", weighted));
+        String letter = toLetterGrade(pct);
+        lblLetter.setText(letter);
+        lblLetter.setForeground(letterColor(letter));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // CRUD ACTIONS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void saveAllGrades() {
+        if (selectedEnrollmentId < 0) { setGradeStatus("Select a student first.", true); return; }
+        if (componentRows.isEmpty())  { setGradeStatus("No grade components loaded.", true); return; }
+
+        // Validate all scores first
+        for (ComponentRow cr : componentRows.values()) {
+            String txt = cr.scoreField.getText().trim();
+            if (txt.isEmpty()) continue;   // blank = skip (don't save 0 unless explicitly typed)
+            double score = parseDouble(txt);
+            if (score < 0) {
+                setGradeStatus("Score cannot be negative for: " + cr.component.getComponentName(), true);
+                return;
+            }
+            if (score > cr.component.getMaxScore()) {
+                setGradeStatus(String.format("Score %.1f exceeds max %.1f for: %s",
+                        score, cr.component.getMaxScore(), cr.component.getComponentName()), true);
+                return;
+            }
+        }
+
+        try {
+            int saved = 0;
+            for (ComponentRow cr : componentRows.values()) {
+                String txt     = cr.scoreField.getText().trim();
+                String remarks = cr.remarksField.getText().trim();
+
+                if (txt.isEmpty()) continue;   // skip blank fields
+                double score = parseDouble(txt);
+
+                Grade existing = gradeDAO.getByEnrollmentAndComponent(
+                        selectedEnrollmentId, cr.component.getId());
+
+                if (existing != null) {
+                    // UPDATE
+                    existing.setScore(score);
+                    existing.setRemarks(remarks);
+                    gradeDAO.update(existing);
+                } else {
+                    // INSERT
+                    Grade g = new Grade();
+                    Enrollment enr = new Enrollment();
+                    enr.setId(selectedEnrollmentId);
+                    g.setEnrollment(enr);
+                    g.setComponentId(cr.component.getId());
+                    g.setGradeType(cr.component.getComponentName());
+                    g.setScore(score);
+                    g.setRemarks(remarks);
+                    gradeDAO.insert(g);
+                }
+                saved++;
+            }
+
+            // Reload form from DB so delete buttons activate and totals update
+            loadGradeForm();
+            refreshStudentTotalInList();
+            setGradeStatus(saved + " grade(s) saved successfully.", false);
+
+        } catch (SQLException ex) {
+            showError("Save failed: " + ex.getMessage());
+        }
+    }
+
+    private void deleteSingleGrade(GradeComponent comp, int gradeId) {
+        if (gradeId < 0) { setGradeStatus("No saved grade for this component.", true); return; }
+        int ok = JOptionPane.showConfirmDialog(this,
+                "Delete the saved grade for \"" + comp.getComponentName() + "\"?\n" +
+                "The field will be cleared and the record removed from the database.",
+                "Confirm Delete", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+        try {
+            gradeDAO.delete(gradeId);
+            loadGradeForm();
+            refreshStudentTotalInList();
+            setGradeStatus("Grade for \"" + comp.getComponentName() + "\" deleted.", false);
+        } catch (SQLException ex) { showError("Delete failed: " + ex.getMessage()); }
+    }
+
+    private void deleteAllGrades() {
+        if (selectedEnrollmentId < 0) { setGradeStatus("Select a student first.", true); return; }
+        boolean anyGrade = componentRows.values().stream().anyMatch(cr -> cr.gradeId > 0);
+        if (!anyGrade) { setGradeStatus("No saved grades to delete for this student.", true); return; }
+
+        int ok = JOptionPane.showConfirmDialog(this,
+                "Delete ALL saved grades for this student in this course?\n" +
+                "This cannot be undone.",
+                "Confirm Delete All", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) return;
+
+        try {
+            for (ComponentRow cr : componentRows.values()) {
+                if (cr.gradeId > 0) gradeDAO.delete(cr.gradeId);
+            }
+            loadGradeForm();
+            refreshStudentTotalInList();
+            setGradeStatus("All grades deleted for this student.", false);
+        } catch (SQLException ex) { showError("Delete failed: " + ex.getMessage()); }
+    }
+
+    /** Refreshes the Total% column in the student list for the currently selected row. */
+    private void refreshStudentTotalInList() {
+        int selRow = studentTable.getSelectedRow();
+        if (selRow < 0) return;
+        String sql =
+            "SELECT SUM((g.score / cgc.max_score) * cgc.weight) AS total_pct " +
+            "FROM grades g " +
+            "JOIN course_grade_components cgc ON cgc.id = g.component_id " +
+            "WHERE g.enrollment_id = ? AND cgc.course_id = ?";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, selectedEnrollmentId);
+            ps.setInt(2, currentCourseId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    double total  = rs.getDouble("total_pct");
+                    boolean has   = !rs.wasNull();
+                    String display = has ? String.format("%.1f%%", total) : "—";
+                    studentModel.setValueAt(display, selRow, 3);
+                    for (Object[] row : allStudentRows) {
+                        if (((Number) row[0]).intValue() == selectedEnrollmentId) {
+                            row[3] = display; break;
+                        }
+                    }
+                }
+            }
+        } catch (SQLException ex) { System.err.println("refreshTotal: " + ex.getMessage()); }
+    }
+
+    private void setGradeStatus(String msg, boolean error) {
+        if (lblGradeStatus == null) return;
+        lblGradeStatus.setText(msg.isEmpty() ? " " : msg);
+        lblGradeStatus.setForeground(error ? ThemeManager.danger() : ThemeManager.SUCCESS);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // COURSE COMBO
+    // ═════════════════════════════════════════════════════════════════════════
+
     private void loadCourses() {
+        CourseItem selected = (CourseItem) cbCourse.getSelectedItem();
         cbCourse.removeAllItems();
-        String sql = "SELECT c.id, s.code, s.name, c.section, c.academic_year, c.semester " +
-                     "FROM courses c " +
-                     "JOIN subjects s ON s.id = c.subject_id " +
-                     "JOIN teachers t ON t.id = c.teacher_id " +
-                     "JOIN users u ON u.id = t.user_id " +
-                     "WHERE u.id = ?";
+        String sql =
+            "SELECT c.id, s.code, s.name, c.section, c.academic_year, c.semester " +
+            "FROM courses c " +
+            "JOIN subjects s ON s.id = c.subject_id " +
+            "JOIN teachers t ON t.id = c.teacher_id " +
+            "JOIN users u    ON u.id = t.user_id " +
+            "WHERE u.id = ? " +
+            "ORDER BY c.academic_year DESC, c.semester, s.code";
         try (Connection conn = DBConnection.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, teacher.getId());
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    String label = rs.getString("code") + " - " + rs.getString("name")
-                        + " [" + rs.getString("section") + "] "
-                        + rs.getInt("academic_year") + " " + rs.getString("semester");
-                    cbCourse.addItem(new CourseItem(rs.getInt("id"), label));
+                    String label = rs.getString("code") + " \u2014 " + rs.getString("name")
+                            + "  [" + rs.getString("section") + "]  "
+                            + rs.getInt("academic_year") + " " + rs.getString("semester");
+                    CourseItem item = new CourseItem(rs.getInt("id"), label);
+                    cbCourse.addItem(item);
+                    if (selected != null && item.id == selected.id)
+                        cbCourse.setSelectedItem(item);
                 }
             }
-        } catch (SQLException ex) {
-            showError(ex);
-        }
-        if (cbCourse.getItemCount() > 0) loadStudents();
+        } catch (SQLException ex) { System.err.println("loadCourses: " + ex.getMessage()); }
+        if (cbCourse.getItemCount() > 0) onCourseChanged();
     }
 
-    private void loadStudents() {
-        studentModel.setRowCount(0);
-        selectedEnrollmentId = -1;
-        gradeModel.setRowCount(0);
-        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
-        if (ci == null) return;
-        String sql = "SELECT e.id, s.student_no, s.first_name, s.last_name, e.status " +
-                     "FROM enrollments e JOIN students s ON s.id = e.student_id " +
-                     "WHERE e.course_id = ?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setInt(1, ci.id);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    studentModel.addRow(new Object[]{
-                        rs.getInt("id"),
-                        rs.getString("student_no"),
-                        rs.getString("first_name") + " " + rs.getString("last_name"),
-                        rs.getString("status")
-                    });
+    // ═════════════════════════════════════════════════════════════════════════
+    // UI HELPERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private JPanel formRow(boolean isHeader) {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        row.setOpaque(true);
+        row.setBackground(isHeader ? ThemeManager.elevated() : ThemeManager.surface());
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, isHeader ? 28 : 34));
+        row.setBorder(new EmptyBorder(isHeader ? 2 : 1, 4, isHeader ? 2 : 1, 4));
+        return row;
+    }
+
+    private JLabel headerCell(String text, int width) {
+        JLabel l = new JLabel(text);
+        l.setFont(ThemeManager.fontBold());
+        l.setForeground(ThemeManager.muted());
+        l.setPreferredSize(new Dimension(width, 22));
+        return l;
+    }
+
+    private JLabel compLabel(String text, int width) {
+        JLabel l = new JLabel(text);
+        l.setFont(ThemeManager.fontBold());
+        l.setForeground(ThemeManager.text());
+        l.setPreferredSize(new Dimension(width, 26));
+        return l;
+    }
+
+    private JLabel valueLabel(String text) { return valueLabel(text, 80); }
+    private JLabel valueLabel(String text, int width) {
+        JLabel l = new JLabel(text);
+        l.setFont(ThemeManager.fontBody());
+        l.setForeground(ThemeManager.muted());
+        l.setPreferredSize(new Dimension(width, 26));
+        return l;
+    }
+
+    private JLabel letterLabel(String text) {
+        JLabel l = new JLabel(text, SwingConstants.CENTER);
+        l.setFont(ThemeManager.fontBold());
+        l.setForeground(letterColor(text));
+        l.setPreferredSize(new Dimension(55, 26));
+        return l;
+    }
+
+    private JTextField inputField(int width) {
+        JTextField tf = new JTextField();
+        tf.setBackground(ThemeManager.elevated());
+        tf.setForeground(ThemeManager.text());
+        tf.setCaretColor(ThemeManager.text());
+        tf.setFont(ThemeManager.fontBody());
+        tf.setPreferredSize(new Dimension(width, 26));
+        tf.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(ThemeManager.border()),
+                new EmptyBorder(2, 6, 2, 6)));
+        return tf;
+    }
+
+    private DefaultTableCellRenderer totalPctRenderer() {
+        return new DefaultTableCellRenderer() {
+            public Component getTableCellRendererComponent(
+                    JTable t, Object v, boolean sel, boolean foc, int r, int c) {
+                super.getTableCellRendererComponent(t, v, sel, foc, r, c);
+                setHorizontalAlignment(SwingConstants.CENTER);
+                String s = v != null ? v.toString() : "—";
+                if (!sel && !s.equals("—")) {
+                    double val = parseDouble(s.replace("%", ""));
+                    if      (val >= 75) { setBackground(ThemeManager.gradeABg()); setForeground(ThemeManager.gradeAFg()); }
+                    else if (val >= 60) { setBackground(ThemeManager.gradeBBg()); setForeground(ThemeManager.gradeBFg()); }
+                    else if (val >= 50) { setBackground(ThemeManager.gradeCBg()); setForeground(ThemeManager.gradeCFg()); }
+                    else                { setBackground(ThemeManager.gradeFBg()); setForeground(ThemeManager.gradeFFg()); }
                 }
+                return this;
             }
-        } catch (SQLException ex) { showError(ex); }
+        };
     }
 
-    private void onStudentSelected() {
-        int row = studentTable.getSelectedRow();
-        if (row < 0) return;
-        selectedEnrollmentId = (int) studentModel.getValueAt(row, 0);
-        loadGrades();
-        clearForm();
+    // ═════════════════════════════════════════════════════════════════════════
+    // MATH / GRADE UTILITIES
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private double calcPct(double score, GradeComponent comp) {
+        return comp.getMaxScore() > 0 ? (score / comp.getMaxScore()) * 100.0 : 0;
     }
 
-    private void loadGrades() {
-        gradeModel.setRowCount(0);
-        if (selectedEnrollmentId < 0) return;
-        String sql = "SELECT * FROM grades WHERE enrollment_id = ?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setInt(1, selectedEnrollmentId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    double score    = rs.getDouble("score");
-                    double maxScore = rs.getDouble("max_score");
-                    double weight   = rs.getDouble("weight");
-                    double weighted = maxScore > 0 ? (score / maxScore) * 100 * weight : 0;
-                    gradeModel.addRow(new Object[]{
-                        rs.getInt("id"),
-                        rs.getString("grade_type"),
-                        score, maxScore, weight,
-                        String.format("%.2f", weighted),
-                        rs.getString("remarks")
-                    });
-                }
-            }
-        } catch (SQLException ex) { showError(ex); }
-    }
-
-    private void onGradeSelected() {
-        int row = gradeTable.getSelectedRow();
-        if (row < 0) return;
-        selectedGradeId = (int) gradeModel.getValueAt(row, 0);
-        cbGradeType.setSelectedItem(gradeModel.getValueAt(row, 1));
-        tfScore.setText(String.valueOf(gradeModel.getValueAt(row, 2)));
-        tfMaxScore.setText(String.valueOf(gradeModel.getValueAt(row, 3)));
-        tfWeight.setText(String.valueOf(gradeModel.getValueAt(row, 4)));
-        tfRemarks.setText((String) gradeModel.getValueAt(row, 6));
-        recalculate();
-    }
-
-    private void saveGrade() {
-        if (selectedEnrollmentId < 0) {
-            JOptionPane.showMessageDialog(this, "Select a student first.");
-            return;
-        }
-        try {
-            Grade g = buildGradeFromForm();
-            Enrollment e = new Enrollment(); e.setId(selectedEnrollmentId);
-            g.setEnrollment(e);
-            gradeDAO.insert(g);
-            loadGrades();
-            clearForm();
-        } catch (Exception ex) { showError(ex); }
-    }
-
-    private void updateGrade() {
-        if (selectedGradeId < 0) {
-            JOptionPane.showMessageDialog(this, "Select a grade row first.");
-            return;
-        }
-        try {
-            Grade g = buildGradeFromForm();
-            g.setId(selectedGradeId);
-            Enrollment e = new Enrollment(); e.setId(selectedEnrollmentId);
-            g.setEnrollment(e);
-            gradeDAO.update(g);
-            loadGrades();
-            clearForm();
-        } catch (Exception ex) { showError(ex); }
-    }
-
-    private void deleteGrade() {
-        if (selectedGradeId < 0) {
-            JOptionPane.showMessageDialog(this, "Select a grade row first.");
-            return;
-        }
-        int confirm = JOptionPane.showConfirmDialog(this, "Delete selected grade?", "Confirm", JOptionPane.YES_NO_OPTION);
-        if (confirm == JOptionPane.YES_OPTION) {
-            try {
-                gradeDAO.delete(selectedGradeId);
-                loadGrades();
-                clearForm();
-            } catch (SQLException ex) { showError(ex); }
-        }
-    }
-
-    private Grade buildGradeFromForm() {
-        Grade g = new Grade();
-        g.setGradeType((String) cbGradeType.getSelectedItem());
-        g.setScore(parseDouble(tfScore.getText()));
-        g.setMaxScore(parseDouble(tfMaxScore.getText()));
-        g.setWeight(parseDouble(tfWeight.getText()));
-        g.setRemarks(tfRemarks.getText().trim());
-        return g;
-    }
-
-    private void recalculate() {
-        double score    = parseDouble(tfScore.getText());
-        double maxScore = parseDouble(tfMaxScore.getText());
-        double weight   = parseDouble(tfWeight.getText());
-
-        if (maxScore <= 0) {
-            lblTotalMarks.setText("—");
-            lblGradeLetter.setText("—");
-            lblGradePoint.setText("—");
-            return;
-        }
-
-        double weighted = (score / maxScore) * 100 * weight;
-        double pct      = (score / maxScore) * 100;
-
-        lblTotalMarks.setText(String.format("%.2f", weighted));
-        lblGradeLetter.setText(toLetterGrade(pct));
-        lblGradePoint.setText(String.format("%.1f", toGradePoint(pct)));
+    private double calcWeighted(double score, GradeComponent comp) {
+        return calcPct(score, comp) * comp.getWeight() / 100.0;
     }
 
     private String toLetterGrade(double pct) {
-        if (pct >= 97) return "A+";
-        if (pct >= 93) return "A";
-        if (pct >= 90) return "A-";
-        if (pct >= 87) return "B+";
-        if (pct >= 83) return "B";
-        if (pct >= 80) return "B-";
-        if (pct >= 77) return "C+";
-        if (pct >= 73) return "C";
-        if (pct >= 70) return "C-";
-        if (pct >= 67) return "D+";
-        if (pct >= 63) return "D";
-        if (pct >= 60) return "D-";
+        if (pct >= 90) return "A+";
+        if (pct >= 85) return "A";
+        if (pct >= 80) return "A-";
+        if (pct >= 75) return "B+";
+        if (pct >= 70) return "B";
+        if (pct >= 65) return "B-";
+        if (pct >= 60) return "C+";
+        if (pct >= 55) return "C";
+        if (pct >= 50) return "C-";
+        if (pct >= 45) return "D";
         return "F";
     }
 
-    private double toGradePoint(double pct) {
-        if (pct >= 97) return 4.0;
-        if (pct >= 93) return 4.0;
-        if (pct >= 90) return 3.7;
-        if (pct >= 87) return 3.3;
-        if (pct >= 83) return 3.0;
-        if (pct >= 80) return 2.7;
-        if (pct >= 77) return 2.3;
-        if (pct >= 73) return 2.0;
-        if (pct >= 70) return 1.7;
-        if (pct >= 67) return 1.3;
-        if (pct >= 63) return 1.0;
-        if (pct >= 60) return 0.7;
-        return 0.0;
-    }
-
-    private void clearForm() {
-        selectedGradeId = -1;
-        cbGradeType.setSelectedIndex(0);
-        tfScore.setText(""); tfMaxScore.setText(""); tfWeight.setText(""); tfRemarks.setText("");
-        lblTotalMarks.setText("—"); lblGradeLetter.setText("—"); lblGradePoint.setText("—");
-        gradeTable.clearSelection();
-        hasUnsavedChanges = false;
+    private Color letterColor(String letter) {
+        if (letter == null || letter.equals("—")) return ThemeManager.muted();
+        switch (letter.charAt(0)) {
+            case 'A': return ThemeManager.gradeAFg();
+            case 'B': return ThemeManager.gradeBFg();
+            case 'C': return ThemeManager.gradeCFg();
+            case 'D': return ThemeManager.gradeDFg();
+            case 'F': return ThemeManager.gradeFFg();
+            default:  return ThemeManager.muted();
+        }
     }
 
     private double parseDouble(String s) {
-        try { return Double.parseDouble(s.trim()); } catch (Exception e) { return 0; }
+        try { return Double.parseDouble(s.trim()); } catch (Exception e) { return 0.0; }
     }
 
-    private JButton styledBtn(String text, Color bg) {
-        JButton b = new JButton(text);
-        b.setBackground(bg); b.setForeground(Color.WHITE);
-        b.setFocusPainted(false); b.setBorderPainted(false);
-        b.setFont(new Font("SansSerif", Font.BOLD, 12));
-        b.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        return b;
+    private String formatScore(double v) {
+        return v == Math.floor(v) ? String.valueOf((int) v) : String.valueOf(v);
     }
 
-    private void showError(Exception ex) {
-        JOptionPane.showMessageDialog(this, ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+    private JTextField styledField() {
+        JTextField tf = new JTextField(10);
+        tf.setBackground(ThemeManager.elevated());
+        tf.setForeground(ThemeManager.text());
+        tf.setCaretColor(ThemeManager.text());
+        tf.setFont(ThemeManager.fontBody());
+        return tf;
     }
 
-    // ========== BULK OPERATIONS AND AUTO-SAVE METHODS ==========
-    
-    private void initializeAutoSave() {
-        autoSaveTimer = new Timer(5000, e -> { // Auto-save every 5 seconds
-            if (hasUnsavedChanges && chkAutoSave.isSelected()) {
-                autoSaveGrade();
-            }
-        });
-        autoSaveTimer.setRepeats(true);
+    private JLabel lbl(String text) {
+        JLabel l = new JLabel(text);
+        l.setFont(ThemeManager.fontBold());
+        l.setForeground(ThemeManager.muted());
+        return l;
     }
-    
-    private void toggleAutoSave() {
-        if (chkAutoSave.isSelected()) {
-            autoSaveTimer.start();
-            JOptionPane.showMessageDialog(this, "Auto-save enabled (every 5 seconds)", "Auto-save", JOptionPane.INFORMATION_MESSAGE);
-        } else {
-            autoSaveTimer.stop();
-        }
+
+    private void showError(String msg) {
+        JOptionPane.showMessageDialog(this, msg, "Error", JOptionPane.ERROR_MESSAGE);
     }
-    
-    private void markUnsavedChanges() {
-        hasUnsavedChanges = true;
-    }
-    
-    private void autoSaveGrade() {
-        if (selectedEnrollmentId < 0 || !validateGradeInput()) {
-            return;
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // INNER CLASSES
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** Holds the UI controls for one grade component row in the form. */
+    private static class ComponentRow {
+        final GradeComponent component;
+        final JTextField     scoreField;
+        final JTextField     remarksField;
+        final JButton        deleteBtn;
+        final int            gradeId;   // -1 if not yet saved in DB
+
+        ComponentRow(GradeComponent component, JTextField scoreField,
+                     JTextField remarksField, JButton deleteBtn, int gradeId) {
+            this.component    = component;
+            this.scoreField   = scoreField;
+            this.remarksField = remarksField;
+            this.deleteBtn    = deleteBtn;
+            this.gradeId      = gradeId;
         }
-        
-        try {
-            Grade g = buildGradeFromForm();
-            Enrollment e = new Enrollment(); 
-            e.setId(selectedEnrollmentId);
-            g.setEnrollment(e);
-            
-            if (selectedGradeId > 0) {
-                g.setId(selectedGradeId);
-                gradeDAO.update(g);
-            } else {
-                gradeDAO.insert(g);
-            }
-            
-            hasUnsavedChanges = false;
-            loadGrades();
-            
-            // Show brief auto-save indicator
-            JLabel autoSaveLabel = new JLabel("Auto-saved ✓");
-            autoSaveLabel.setForeground(new Color(25, 135, 84));
-            autoSaveLabel.setFont(new Font("SansSerif", Font.ITALIC, 10));
-            
-        } catch (Exception ex) {
-            // Silent fail for auto-save to avoid interrupting user
-            System.err.println("Auto-save failed: " + ex.getMessage());
-        }
-    }
-    
-    private boolean validateGradeInput() {
-        String scoreText = tfScore.getText().trim();
-        String maxScoreText = tfMaxScore.getText().trim();
-        String weightText = tfWeight.getText().trim();
-        
-        if (scoreText.isEmpty() || maxScoreText.isEmpty() || weightText.isEmpty()) {
-            return false;
-        }
-        
-        try {
-            double score = Double.parseDouble(scoreText);
-            double maxScore = Double.parseDouble(maxScoreText);
-            double weight = Double.parseDouble(weightText);
-            
-            return score >= 0 && maxScore > 0 && weight >= 0 && weight <= 1.0;
-        } catch (NumberFormatException e) {
-            return false;
-        }
-    }
-    
-    private void bulkSaveGrades() {
-        if (selectedEnrollmentId < 0) {
-            JOptionPane.showMessageDialog(this, "Select a student first.", "Bulk Save", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        
-        String input = JOptionPane.showInputDialog(this, 
-            "Enter grades in format: type,score,maxScore,weight,remarks (one per line)\n" +
-            "Example:\nquiz,85,100,0.1,Good work\nassignment,92,100,0.2,Excellent", 
-            "Bulk Grade Entry", JOptionPane.PLAIN_MESSAGE);
-            
-        if (input == null || input.trim().isEmpty()) return;
-        
-        String[] lines = input.trim().split("\n");
-        List<Grade> gradesToSave = new ArrayList<>();
-        List<String> errors = new ArrayList<>();
-        
-        for (int i = 0; i < lines.length; i++) {
-            String line = lines[i].trim();
-            if (line.isEmpty()) continue;
-            
-            String[] parts = line.split(",");
-            if (parts.length < 4) {
-                errors.add("Line " + (i + 1) + ": Invalid format");
-                continue;
-            }
-            
-            try {
-                Grade g = new Grade();
-                g.setGradeType(parts[0].trim());
-                g.setScore(Double.parseDouble(parts[1].trim()));
-                g.setMaxScore(Double.parseDouble(parts[2].trim()));
-                g.setWeight(Double.parseDouble(parts[3].trim()));
-                g.setRemarks(parts.length > 4 ? parts[4].trim() : "");
-                
-                Enrollment e = new Enrollment();
-                e.setId(selectedEnrollmentId);
-                g.setEnrollment(e);
-                
-                gradesToSave.add(g);
-            } catch (NumberFormatException ex) {
-                errors.add("Line " + (i + 1) + ": Invalid number format");
-            }
-        }
-        
-        if (!errors.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Errors found:\n" + String.join("\n", errors), 
-                "Bulk Save Errors", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-        
-        try {
-            for (Grade g : gradesToSave) {
-                gradeDAO.insert(g);
-            }
-            JOptionPane.showMessageDialog(this, "Successfully saved " + gradesToSave.size() + " grades!", 
-                "Bulk Save Complete", JOptionPane.INFORMATION_MESSAGE);
-            loadGrades();
-            clearForm();
-        } catch (Exception ex) {
-            showError(ex);
-        }
-    }
-    
-    private void importGradesFromCSV() {
-        JFileChooser fileChooser = new JFileChooser();
-        fileChooser.setFileFilter(new FileNameExtensionFilter("CSV Files", "csv"));
-        
-        if (fileChooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
-            return;
-        }
-        
-        File file = fileChooser.getSelectedFile();
-        List<String> errors = new ArrayList<>();
-        int successCount = 0;
-        
-        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
-            String line;
-            int lineNum = 0;
-            
-            // Skip header line
-            br.readLine();
-            lineNum++;
-            
-            while ((line = br.readLine()) != null) {
-                lineNum++;
-                if (line.trim().isEmpty()) continue;
-                
-                String[] parts = line.split(",");
-                if (parts.length < 6) {
-                    errors.add("Line " + lineNum + ": Missing columns");
-                    continue;
-                }
-                
-                try {
-                    String studentNo = parts[0].trim();
-                    String gradeType = parts[1].trim();
-                    double score = Double.parseDouble(parts[2].trim());
-                    double maxScore = Double.parseDouble(parts[3].trim());
-                    double weight = Double.parseDouble(parts[4].trim());
-                    String remarks = parts[5].trim();
-                    
-                    // Find enrollment ID by student number
-                    int enrollmentId = findEnrollmentByStudentNo(studentNo);
-                    if (enrollmentId < 0) {
-                        errors.add("Line " + lineNum + ": Student not found: " + studentNo);
-                        continue;
-                    }
-                    
-                    Grade g = new Grade();
-                    g.setGradeType(gradeType);
-                    g.setScore(score);
-                    g.setMaxScore(maxScore);
-                    g.setWeight(weight);
-                    g.setRemarks(remarks);
-                    
-                    Enrollment e = new Enrollment();
-                    e.setId(enrollmentId);
-                    g.setEnrollment(e);
-                    
-                    gradeDAO.insert(g);
-                    successCount++;
-                    
-                } catch (NumberFormatException ex) {
-                    errors.add("Line " + lineNum + ": Invalid number format");
-                } catch (Exception ex) {
-                    errors.add("Line " + lineNum + ": " + ex.getMessage());
-                }
-            }
-            
-            String message = "Import complete!\nSuccessfully imported: " + successCount + " grades";
-            if (!errors.isEmpty()) {
-                message += "\nErrors: " + errors.size() + " (see details below)\n\n" + 
-                          String.join("\n", errors.subList(0, Math.min(errors.size(), 10)));
-                if (errors.size() > 10) {
-                    message += "\n... and " + (errors.size() - 10) + " more errors";
-                }
-            }
-            
-            JOptionPane.showMessageDialog(this, message, "Import Results", 
-                errors.isEmpty() ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.WARNING_MESSAGE);
-            
-            loadGrades();
-            
-        } catch (IOException ex) {
-            showError(ex);
-        }
-    }
-    
-    private void exportGradesToCSV() {
-        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
-        if (ci == null) {
-            JOptionPane.showMessageDialog(this, "Select a course first.", "Export", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        
-        JFileChooser fileChooser = new JFileChooser();
-        fileChooser.setFileFilter(new FileNameExtensionFilter("CSV Files", "csv"));
-        fileChooser.setSelectedFile(new File("grades_export.csv"));
-        
-        if (fileChooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
-            return;
-        }
-        
-        File file = fileChooser.getSelectedFile();
-        
-        try (PrintWriter pw = new PrintWriter(new FileWriter(file))) {
-            pw.println("Student No,Student Name,Grade Type,Score,Max Score,Weight,Weighted %,Letter Grade,Remarks");
-            
-            String sql = "SELECT s.student_no, s.first_name, s.last_name, g.grade_type, " +
-                        "g.score, g.max_score, g.weight, g.remarks " +
-                        "FROM enrollments e " +
-                        "JOIN students s ON s.id = e.student_id " +
-                        "LEFT JOIN grades g ON g.enrollment_id = e.id " +
-                        "WHERE e.course_id = ? " +
-                        "ORDER BY s.student_no, g.grade_type";
-                        
-            try (Connection conn = DBConnection.getConnection();
-                 PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setInt(1, ci.id);
-                
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        String studentNo = rs.getString("student_no");
-                        String studentName = rs.getString("first_name") + " " + rs.getString("last_name");
-                        String gradeType = rs.getString("grade_type");
-                        
-                        if (gradeType != null) { // Has grades
-                            double score = rs.getDouble("score");
-                            double maxScore = rs.getDouble("max_score");
-                            double weight = rs.getDouble("weight");
-                            String remarks = rs.getString("remarks");
-                            
-                            double weighted = maxScore > 0 ? (score / maxScore) * 100 * weight : 0;
-                            double pct = maxScore > 0 ? (score / maxScore) * 100 : 0;
-                            String letterGrade = toLetterGrade(pct);
-                            
-                            pw.printf("%s,%s,%s,%.2f,%.2f,%.2f,%.2f,%s,%s%n",
-                                studentNo, studentName, gradeType, score, maxScore, weight, 
-                                weighted, letterGrade, remarks != null ? remarks : "");
-                        } else { // No grades yet
-                            pw.printf("%s,%s,,,,,,,,%n", studentNo, studentName);
-                        }
-                    }
-                }
-            }
-            
-            JOptionPane.showMessageDialog(this, "Grades exported successfully to:\n" + file.getAbsolutePath(), 
-                "Export Complete", JOptionPane.INFORMATION_MESSAGE);
-                
-        } catch (Exception ex) {
-            showError(ex);
-        }
-    }
-    
-    private void applyGradeToAllStudents() {
-        if (!validateGradeInput()) {
-            JOptionPane.showMessageDialog(this, "Please fill in valid grade information first.", 
-                "Apply to All", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
-        
-        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
-        if (ci == null) return;
-        
-        int confirm = JOptionPane.showConfirmDialog(this, 
-            "Apply current grade to ALL students in this course?\n" +
-            "Type: " + cbGradeType.getSelectedItem() + "\n" +
-            "Score: " + tfScore.getText() + "/" + tfMaxScore.getText() + "\n" +
-            "Weight: " + tfWeight.getText(), 
-            "Confirm Apply to All", JOptionPane.YES_NO_OPTION);
-            
-        if (confirm != JOptionPane.YES_OPTION) return;
-        
-        try {
-            String sql = "SELECT id FROM enrollments WHERE course_id = ?";
-            List<Integer> enrollmentIds = new ArrayList<>();
-            
-            try (Connection conn = DBConnection.getConnection();
-                 PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setInt(1, ci.id);
-                
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        enrollmentIds.add(rs.getInt("id"));
-                    }
-                }
-            }
-            
-            int successCount = 0;
-            for (int enrollmentId : enrollmentIds) {
-                try {
-                    Grade g = buildGradeFromForm();
-                    Enrollment e = new Enrollment();
-                    e.setId(enrollmentId);
-                    g.setEnrollment(e);
-                    
-                    gradeDAO.insert(g);
-                    successCount++;
-                } catch (Exception ex) {
-                    System.err.println("Failed to save grade for enrollment " + enrollmentId + ": " + ex.getMessage());
-                }
-            }
-            
-            JOptionPane.showMessageDialog(this, 
-                "Applied grade to " + successCount + " out of " + enrollmentIds.size() + " students.", 
-                "Apply Complete", JOptionPane.INFORMATION_MESSAGE);
-            
-            loadGrades();
-            clearForm();
-            
-        } catch (Exception ex) {
-            showError(ex);
-        }
-    }
-    
-    private int findEnrollmentByStudentNo(String studentNo) {
-        CourseItem ci = (CourseItem) cbCourse.getSelectedItem();
-        if (ci == null) return -1;
-        
-        String sql = "SELECT e.id FROM enrollments e " +
-                    "JOIN students s ON s.id = e.student_id " +
-                    "WHERE e.course_id = ? AND s.student_no = ?";
-                    
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setInt(1, ci.id);
-            ps.setString(2, studentNo);
-            
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getInt("id");
-                }
-            }
-        } catch (SQLException ex) {
-            System.err.println("Error finding enrollment: " + ex.getMessage());
-        }
-        
-        return -1;
     }
 
     private static class CourseItem {
-        int id; String label;
+        final int id; final String label;
         CourseItem(int id, String label) { this.id = id; this.label = label; }
         public String toString() { return label; }
-    }
-
-    private static class SimpleDocListener implements javax.swing.event.DocumentListener {
-        private final Runnable action;
-        SimpleDocListener(Runnable action) { this.action = action; }
-        public void insertUpdate(javax.swing.event.DocumentEvent e)  { action.run(); }
-        public void removeUpdate(javax.swing.event.DocumentEvent e)  { action.run(); }
-        public void changedUpdate(javax.swing.event.DocumentEvent e) { action.run(); }
     }
 }

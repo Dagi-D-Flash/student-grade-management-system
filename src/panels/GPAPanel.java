@@ -4,6 +4,7 @@ import models.User;
 import util.DBConnection;
 import util.GPACalculator;
 import util.GPACalculator.SemesterGPA;
+import util.ThemeManager;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableCellRenderer;
@@ -26,7 +27,6 @@ public class GPAPanel extends JPanel {
 
     private JLabel lblCGPA, lblCGPALetter, lblCGPAStatus;
     private JLabel lblSemGPA, lblSemCredits, lblSemCourses;
-    private JComboBox<String> cbSemester;
     private JButton btnRefresh;
 
     private int studentId = -1;
@@ -34,11 +34,11 @@ public class GPAPanel extends JPanel {
     public GPAPanel(User user) {
         this.user = user;
         setLayout(new BorderLayout(10, 10));
-        setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
-        setBackground(new Color(245, 246, 250));
+        setBorder(ThemeManager.panelBorder());
+        setBackground(ThemeManager.bg());
 
-        add(buildCGPACard(),     BorderLayout.NORTH);
-        add(buildCenterSplit(),  BorderLayout.CENTER);
+        add(buildCGPACard(),    BorderLayout.NORTH);
+        add(buildCenterSplit(), BorderLayout.CENTER);
 
         studentId = resolveStudentId();
         loadAll();
@@ -46,30 +46,21 @@ public class GPAPanel extends JPanel {
 
     private JPanel buildCGPACard() {
         JPanel card = new JPanel(new BorderLayout(20, 0));
-        card.setBackground(Color.WHITE);
-        card.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(13, 110, 253), 2),
-            BorderFactory.createEmptyBorder(16, 24, 16, 24)
-        ));
+        card.setBackground(ThemeManager.surface());
+        card.setBorder(ThemeManager.accentBorder(ThemeManager.accent()));
 
         JPanel left = new JPanel(new GridLayout(1, 3, 30, 0));
         left.setOpaque(false);
 
-        lblCGPA       = bigLabel("—", new Color(13, 110, 253), 38);
-        lblCGPALetter = bigLabel("—", new Color(25, 135, 84),  28);
-        lblCGPAStatus = bigLabel("—", new Color(108, 117, 125), 16);
+        lblCGPA       = bigLabel("—", ThemeManager.accent(), 38);
+        lblCGPALetter = bigLabel("—", ThemeManager.SUCCESS,  28);
+        lblCGPAStatus = bigLabel("—", ThemeManager.muted(),  16);
 
-        left.add(statBlock("CGPA (4.0 Scale)", lblCGPA));
+        left.add(statBlock("CGPA (4.0 Scale)",    lblCGPA));
         left.add(statBlock("Overall Letter Grade", lblCGPALetter));
         left.add(statBlock("Academic Standing",    lblCGPAStatus));
 
-        btnRefresh = new JButton("Refresh");
-        btnRefresh.setBackground(new Color(13, 110, 253));
-        btnRefresh.setForeground(Color.WHITE);
-        btnRefresh.setFocusPainted(false);
-        btnRefresh.setBorderPainted(false);
-        btnRefresh.setFont(new Font("SansSerif", Font.BOLD, 12));
-        btnRefresh.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        btnRefresh = ThemeManager.primaryButton("Refresh");
         btnRefresh.addActionListener(e -> loadAll());
 
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
@@ -96,11 +87,7 @@ public class GPAPanel extends JPanel {
             public boolean isCellEditable(int r, int c) { return false; }
         };
         semesterTable = new JTable(semesterModel);
-        semesterTable.setRowHeight(28);
-        semesterTable.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        semesterTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
-        semesterTable.setGridColor(new Color(230, 230, 230));
-        semesterTable.setSelectionBackground(new Color(210, 230, 255));
+        ThemeManager.styleTable(semesterTable);
         colorizeCol(semesterTable, 5);
         semesterTable.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) onSemesterSelected();
@@ -109,7 +96,9 @@ public class GPAPanel extends JPanel {
         JPanel footer = buildSemesterFooter();
 
         JPanel wrapper = new JPanel(new BorderLayout());
-        wrapper.setBorder(BorderFactory.createTitledBorder("GPA per Semester"));
+        wrapper.setBackground(ThemeManager.surface());
+        wrapper.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(ThemeManager.border()), "GPA per Semester"));
         wrapper.add(new JScrollPane(semesterTable), BorderLayout.CENTER);
         wrapper.add(footer, BorderLayout.SOUTH);
         return wrapper;
@@ -117,18 +106,25 @@ public class GPAPanel extends JPanel {
 
     private JPanel buildSemesterFooter() {
         JPanel footer = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 6));
-        footer.setBackground(new Color(240, 248, 255));
-        footer.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(200, 220, 240)));
+        footer.setBackground(ThemeManager.elevated());
+        footer.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, ThemeManager.border()));
 
         lblSemGPA     = new JLabel("GPA: —");
         lblSemCredits = new JLabel("Credits: —");
         lblSemCourses = new JLabel("Courses: —");
 
-        lblSemGPA.setFont(new Font("SansSerif", Font.BOLD, 13));
-        lblSemCredits.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        lblSemCourses.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        lblSemGPA.setFont(ThemeManager.fontBold());
+        lblSemGPA.setForeground(ThemeManager.text());
+        lblSemCredits.setFont(ThemeManager.fontBody());
+        lblSemCredits.setForeground(ThemeManager.muted());
+        lblSemCourses.setFont(ThemeManager.fontBody());
+        lblSemCourses.setForeground(ThemeManager.muted());
 
-        footer.add(new JLabel("Selected Semester →"));
+        JLabel arrow = new JLabel("Selected Semester \u2192");
+        arrow.setFont(ThemeManager.fontSmall());
+        arrow.setForeground(ThemeManager.muted());
+
+        footer.add(arrow);
         footer.add(lblSemGPA);
         footer.add(lblSemCredits);
         footer.add(lblSemCourses);
@@ -141,15 +137,13 @@ public class GPAPanel extends JPanel {
             public boolean isCellEditable(int r, int c) { return false; }
         };
         subjectTable = new JTable(subjectModel);
-        subjectTable.setRowHeight(28);
-        subjectTable.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        subjectTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
-        subjectTable.setGridColor(new Color(230, 230, 230));
-        subjectTable.setSelectionBackground(new Color(210, 230, 255));
+        ThemeManager.styleTable(subjectTable);
         colorizeCol(subjectTable, 6);
 
         JPanel wrapper = new JPanel(new BorderLayout());
-        wrapper.setBorder(BorderFactory.createTitledBorder("Subject-wise GPA Contribution"));
+        wrapper.setBackground(ThemeManager.surface());
+        wrapper.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(ThemeManager.border()), "Subject-wise GPA Contribution"));
         wrapper.add(new JScrollPane(subjectTable));
         return wrapper;
     }
@@ -158,7 +152,6 @@ public class GPAPanel extends JPanel {
         semesterModel.setRowCount(0);
         subjectModel.setRowCount(0);
         if (studentId < 0) return;
-
         loadCGPA();
         loadSemesterTable();
         loadSubjectTable();
@@ -171,15 +164,15 @@ public class GPAPanel extends JPanel {
                 lblCGPA.setText("N/A");
                 lblCGPALetter.setText("N/A");
                 lblCGPAStatus.setText("No grades yet");
-                lblCGPA.setForeground(new Color(108, 117, 125));
+                lblCGPA.setForeground(ThemeManager.muted());
             } else {
                 double pct = cgpaToPercent(cgpa);
                 lblCGPA.setText(String.format("%.2f", cgpa));
-                lblCGPA.setForeground(GPACalculator.gpaColor(cgpa));
+                lblCGPA.setForeground(ThemeManager.gpaColor(cgpa));
                 lblCGPALetter.setText(GPACalculator.toLetterGrade(pct));
-                lblCGPALetter.setForeground(GPACalculator.gpaColor(cgpa));
+                lblCGPALetter.setForeground(ThemeManager.gpaColor(cgpa));
                 lblCGPAStatus.setText(academicStanding(cgpa));
-                lblCGPAStatus.setForeground(GPACalculator.gpaColor(cgpa));
+                lblCGPAStatus.setForeground(ThemeManager.gpaColor(cgpa));
             }
         } catch (SQLException ex) { showError(ex); }
     }
@@ -191,13 +184,8 @@ public class GPAPanel extends JPanel {
                 double pct    = cgpaToPercent(s.gpa);
                 String letter = s.gpa > 0 ? GPACalculator.toLetterGrade(pct) : "N/A";
                 semesterModel.addRow(new Object[]{
-                    s.academicYear,
-                    s.semester,
-                    s.courseCount,
-                    s.totalCredits,
-                    String.format("%.2f", s.gpa),
-                    letter,
-                    academicStanding(s.gpa)
+                    s.academicYear, s.semester, s.courseCount, s.totalCredits,
+                    String.format("%.2f", s.gpa), letter, academicStanding(s.gpa)
                 });
             }
         } catch (SQLException ex) { showError(ex); }
@@ -206,11 +194,12 @@ public class GPAPanel extends JPanel {
     private void loadSubjectTable() {
         String sql =
             "SELECT sub.code, sub.name, c.academic_year, c.semester, sub.credits, " +
-            "       SUM(g.score / g.max_score * 100 * g.weight) / SUM(g.weight) AS avg_pct " +
+            "       SUM((g.score / cgc.max_score) * cgc.weight) AS avg_pct " +
             "FROM enrollments e " +
             "JOIN courses c    ON c.id   = e.course_id " +
             "JOIN subjects sub ON sub.id = c.subject_id " +
-            "JOIN grades g     ON g.enrollment_id = e.id AND g.max_score > 0 " +
+            "JOIN grades g     ON g.enrollment_id = e.id " +
+            "JOIN course_grade_components cgc ON cgc.id = g.component_id " +
             "WHERE e.student_id = ? " +
             "GROUP BY e.id, sub.code, sub.name, c.academic_year, c.semester, sub.credits " +
             "ORDER BY c.academic_year, c.semester, sub.code";
@@ -245,28 +234,25 @@ public class GPAPanel extends JPanel {
             lblSemCourses.setText("Courses: —");
             return;
         }
-        String gpa     = (String) semesterModel.getValueAt(row, 4);
-        String credits = String.valueOf(semesterModel.getValueAt(row, 3));
-        String courses = String.valueOf(semesterModel.getValueAt(row, 2));
-        String year    = String.valueOf(semesterModel.getValueAt(row, 0));
-        String sem     = (String) semesterModel.getValueAt(row, 1);
-
-        lblSemGPA.setText("GPA: " + gpa);
-        lblSemCredits.setText("Credits: " + credits);
-        lblSemCourses.setText("Courses: " + courses);
-
-        filterSubjectTable(year, sem);
+        lblSemGPA.setText("GPA: " + semesterModel.getValueAt(row, 4));
+        lblSemCredits.setText("Credits: " + semesterModel.getValueAt(row, 3));
+        lblSemCourses.setText("Courses: " + semesterModel.getValueAt(row, 2));
+        filterSubjectTable(
+            String.valueOf(semesterModel.getValueAt(row, 0)),
+            (String) semesterModel.getValueAt(row, 1)
+        );
     }
 
     private void filterSubjectTable(String year, String sem) {
         subjectModel.setRowCount(0);
         String sql =
             "SELECT sub.code, sub.name, c.academic_year, c.semester, sub.credits, " +
-            "       SUM(g.score / g.max_score * 100 * g.weight) / SUM(g.weight) AS avg_pct " +
+            "       SUM((g.score / cgc.max_score) * cgc.weight) AS avg_pct " +
             "FROM enrollments e " +
             "JOIN courses c    ON c.id   = e.course_id " +
             "JOIN subjects sub ON sub.id = c.subject_id " +
-            "JOIN grades g     ON g.enrollment_id = e.id AND g.max_score > 0 " +
+            "JOIN grades g     ON g.enrollment_id = e.id " +
+            "JOIN course_grade_components cgc ON cgc.id = g.component_id " +
             "WHERE e.student_id = ? AND c.academic_year = ? AND c.semester = ? " +
             "GROUP BY e.id, sub.code, sub.name, c.academic_year, c.semester, sub.credits";
         try (Connection conn = DBConnection.getConnection();
@@ -307,36 +293,34 @@ public class GPAPanel extends JPanel {
     }
 
     private double cgpaToPercent(double cgpa) {
-        if (cgpa >= 4.0) return 97;
-        if (cgpa >= 3.7) return 90;
-        if (cgpa >= 3.3) return 87;
-        if (cgpa >= 3.0) return 83;
-        if (cgpa >= 2.7) return 80;
-        if (cgpa >= 2.3) return 77;
-        if (cgpa >= 2.0) return 73;
-        if (cgpa >= 1.7) return 70;
-        if (cgpa >= 1.3) return 67;
-        if (cgpa >= 1.0) return 63;
-        if (cgpa >= 0.7) return 60;
-        return 0;
+        if (cgpa >= 4.0)  return 90;
+        if (cgpa >= 3.75) return 85;
+        if (cgpa >= 3.5)  return 80;
+        if (cgpa >= 3.0)  return 75;
+        if (cgpa >= 2.75) return 70;
+        if (cgpa >= 2.5)  return 65;
+        if (cgpa >= 2.0)  return 60;
+        if (cgpa >= 1.75) return 55;
+        if (cgpa >= 1.0)  return 50;
+        return 45;
     }
 
     private String academicStanding(double gpa) {
-        if (gpa >= 3.7) return "Summa Cum Laude";
-        if (gpa >= 3.5) return "Magna Cum Laude";
-        if (gpa >= 3.0) return "Cum Laude";
-        if (gpa >= 2.0) return "Good Standing";
-        if (gpa >= 1.0) return "Probation";
-        return "Academic Warning";
+        if (gpa >= 3.75) return "Distinction";
+        if (gpa >= 3.5)  return "Very Good";
+        if (gpa >= 3.0)  return "Good";
+        if (gpa >= 2.0)  return "Pass";
+        if (gpa >= 1.0)  return "Probation";
+        return "Fail";
     }
 
     private JPanel statBlock(String title, JLabel valueLabel) {
         JPanel p = new JPanel(new BorderLayout(0, 4));
         p.setOpaque(false);
         JLabel t = new JLabel(title, SwingConstants.CENTER);
-        t.setFont(new Font("SansSerif", Font.PLAIN, 11));
-        t.setForeground(new Color(120, 120, 120));
-        p.add(t, BorderLayout.NORTH);
+        t.setFont(ThemeManager.fontSmall());
+        t.setForeground(ThemeManager.muted());
+        p.add(t,          BorderLayout.NORTH);
         p.add(valueLabel, BorderLayout.CENTER);
         return p;
     }
@@ -350,26 +334,20 @@ public class GPAPanel extends JPanel {
 
     private void colorizeCol(JTable table, int col) {
         table.getColumnModel().getColumn(col).setCellRenderer(new DefaultTableCellRenderer() {
-            @Override
             public Component getTableCellRendererComponent(JTable t, Object value,
                     boolean sel, boolean focus, int row, int column) {
                 super.getTableCellRendererComponent(t, value, sel, focus, row, column);
                 setHorizontalAlignment(SwingConstants.CENTER);
                 String v = value != null ? value.toString() : "";
                 if (!sel) {
-                    switch (v) {
-                        case "A+": case "A": case "A-":
-                            setBackground(new Color(212, 237, 218)); setForeground(new Color(21, 87, 36)); break;
-                        case "B+": case "B": case "B-":
-                            setBackground(new Color(204, 229, 255)); setForeground(new Color(0, 64, 133)); break;
-                        case "C+": case "C": case "C-":
-                            setBackground(new Color(255, 243, 205)); setForeground(new Color(133, 100, 4)); break;
-                        case "D+": case "D": case "D-":
-                            setBackground(new Color(255, 228, 196)); setForeground(new Color(133, 60, 0)); break;
-                        case "F":
-                            setBackground(new Color(248, 215, 218)); setForeground(new Color(114, 28, 36)); break;
-                        default:
-                            setBackground(Color.WHITE); setForeground(Color.BLACK);
+                    char c = v.isEmpty() ? ' ' : v.charAt(0);
+                    switch (c) {
+                        case 'A': setBackground(ThemeManager.gradeABg()); setForeground(ThemeManager.gradeAFg()); break;
+                        case 'B': setBackground(ThemeManager.gradeBBg()); setForeground(ThemeManager.gradeBFg()); break;
+                        case 'C': setBackground(ThemeManager.gradeCBg()); setForeground(ThemeManager.gradeCFg()); break;
+                        case 'D': setBackground(ThemeManager.gradeDBg()); setForeground(ThemeManager.gradeDFg()); break;
+                        case 'F': setBackground(ThemeManager.gradeFBg()); setForeground(ThemeManager.gradeFFg()); break;
+                        default:  setBackground(ThemeManager.surface()); setForeground(ThemeManager.text());
                     }
                 }
                 return this;
@@ -378,6 +356,6 @@ public class GPAPanel extends JPanel {
     }
 
     private void showError(Exception ex) {
-        JOptionPane.showMessageDialog(this, ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        System.err.println("Error: " + ex.getMessage());
     }
 }
