@@ -22,7 +22,6 @@ public class StudentProfilePanel extends JPanel {
     private static final int AVATAR_DISPLAY = 140;
     private static final int AVATAR_STORE   = 800;   // store at 800px for ultra-HD display
     private static final String PHOTO_DIR   = "profile_photos";
-
     private final User       user;
     private final StudentDAO dao = new StudentDAO();
     private Student          student;
@@ -35,14 +34,12 @@ public class StudentProfilePanel extends JPanel {
     private JButton    btnSave, btnChangePass;
     private JLabel     lblStatus;
     private String     origEmail, origPhone;
-
     public StudentProfilePanel(User user) {
         this.user = user;
         setLayout(new BorderLayout());
         setBackground(ThemeManager.bg());
         reload();
     }
-
     // ── Load / reload ─────────────────────────────────────────────────────────
 
     private void reload() {
