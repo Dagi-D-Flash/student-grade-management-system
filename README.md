@@ -198,21 +198,4 @@ The application follows a layered organization:
 - **Utility layer:** Database connection management, GPA calculations, grade-structure updates, theme management, and transcript generation.
 - **Database layer:** MySQL tables and relationships.
 
-## Important Notes
 
-This repository represents a student software project and should not be considered production-ready.
-
-Before using it with real student information:
-
-- Replace plaintext password handling with secure password hashing.
-- Move database credentials outside the source code.
-- Remove real student records and personal photos from the public repository.
-- Review access control and database permissions.
-- Verify GPA and grading rules against the institution's official academic regulations.
-- Add a reproducible build configuration and document the required dependency versions.
-
-
-
-Software Engineering Student | Java Developer
-
-GitHub: [@Dagi-D-Flash](https://github.com/Dagi-D-Flash)
